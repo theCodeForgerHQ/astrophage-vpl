@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build
+build/
+dist/
+_build/
+site/
+
+# Scientific data — never commit generated artifacts
+*.h5
+*.hdf5
+*.zarr/
+*.npz
+*.vtk
+*.vtu
+*.pvd
+runs/
+artifacts/
+outputs/
+checkpoints/
+
+# DVC / MLflow local state
+mlruns/
+.dvc/cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# LaTeX intermediates
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
