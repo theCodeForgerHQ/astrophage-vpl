@@ -28,9 +28,50 @@ Version 1.0 · Status: **Baseline** · Owner: Ajayaditya L
 
 | Component | Assumed | Note |
 |---|---|---|
-| CPU | 16 cores / 32 threads | The PDE and PIC workhorse |
+| CPU | 16 cores / 32 threads | The PDE workhorse (FEM / fluid) |
 | RAM | 64 GB | PIC domains and POD reduction fit comfortably |
 | Storage | 2 TB NVMe + bulk HDD | DS-TRAIN raw output is ~400 GB (doc 09 §4.2) |
+
+### 1.3 Confirmed hardware position (2026-08-05)
+
+| Option | Status | Plan |
+|---|---|---|
+| **RTX A4000, 16 GB** | **Available now** | **The reference machine. Every number in this document assumes it** |
+| RTX A40, 48 GB (college) | Possibly obtainable | **Not planned on.** If it arrives, everything below runs ~1.6× faster |
+| Azure GPU | **Unavailable** | Verified by direct quota query on both subscriptions — see §1.4 |
+
+### 1.4 Azure availability — verified, not assumed
+
+Quota was queried directly on both subscriptions across eastus, eastus2, westus2, westus3,
+southcentralus, centralindia and southindia:
+
+| Subscription | Type | Regional vCPU | GPU-family quota |
+|---|---|---|---|
+| `33930bf2…` (student) | Azure for Students, spending limit **On** | **6** | **0** in every family, every region |
+| `759d4908…` (sponsored) | Sponsored, spending limit **Off** | 65 | **0** in every family, every region |
+
+T4 SKUs (`NC4as_T4_v3` …) are *offerable* in eastus on the student subscription, but family
+quota is zero, so deployment would fail. Azure for Students cannot raise GPU quota; the
+sponsored subscription could via a support request (1–2 business days), but **nothing in the
+plan depends on it**.
+
+### 1.5 VRAM is capacity, not speed
+
+Recorded because it is a common and expensive misconception. Peak VRAM demand across the
+entire programme:
+
+| Workload | VRAM |
+|---|---|
+| PIC, 2 × 10⁶ particles × 7 floats | 56 MB |
+| PIC at 10⁸ particles | 2.8 GB |
+| GP kernel matrix, 5 500 training points | 121 MB |
+| GP at 20 000 points | 1.6 GB |
+| One NUTS inversion | a few MB |
+
+**16 GB is roughly 50× more than required.** Nothing in this project is memory-bound. The
+quantities that govern wall-clock are **memory bandwidth** (PIC is a gather/scatter workload)
+and **FP32 throughput** (surrogate training and batched inference). A larger-VRAM card buys
+throughput only insofar as it also brings more bandwidth and more cores.
 
 ---
 
@@ -47,7 +88,8 @@ GPU". The correct allocation is:
 | Poisson / FEM field solve | FP64 | **CPU** | Ill-conditioned; FP32 round-off is comparable to the physical charge separation being resolved |
 | Fluid solve (L1) | FP64 | **CPU** | Same |
 | PIC field solve | FP64 | **CPU** | Same |
-| PIC particle push | FP32 acceptable | **GPU (Tier 1)** | Bandwidth-bound; positions can be FP32 with a fixed-point offset. **Requires the precision-sensitivity test of §5** |
+| **PIC particle push** | FP32 acceptable | **GPU — primary path** | Bandwidth-bound; positions FP32 with a fixed-point offset. **Requires the precision-sensitivity test of §5.** This is the single decision that collapses DS-TRAIN from 11.5 days to ~11 hours |
+| PIC field solve (1-D tridiagonal, 10³ unknowns) | FP64 | GPU or CPU | Trivially cheap either way; keep FP64 |
 | Surrogate training (GP / NN) | FP32 / TF32 | **GPU** | Native fit |
 | MCMC on the surrogate | FP32 | **GPU** | Native fit |
 | Ray tracing | FP32 | **GPU** | Native fit |
@@ -70,7 +112,8 @@ for production. Anything else is trading correctness for speed without measuring
 |---|---|---|---|---|
 | L0 analytic solve | ~10 µs | unlimited | negligible | CPU |
 | L1 fluid solve | ~1 s | 10⁴ | ~3 h | CPU (16 cores) |
-| **L2 PIC solve** | **~3 min** (doc 03 §4.4) | **5 500** (DS-TRAIN + DS-TEST) | **~275 h ≈ 11.5 days** | **CPU, 16 cores** |
+| **L2 PIC solve — CPU, N_ppc = 1000** | ~3 min (doc 03 §4.4) | 5 500 | ~275 h ≈ 11.5 days | CPU, 16 cores |
+| **L2 PIC solve — GPU, N_ppc = 200** | **~5 s** | **5 500** | **~8 h** | **A4000 (JAX)** |
 | POD reduction | ~1 h total | 1 | 1 h | CPU |
 | GP surrogate training | ~20 min | ~80 outputs, batched | ~2 h | GPU |
 | L3 surrogate evaluation | ~1 ms | 10⁶ per inversion | ~15 min per inversion | GPU |
@@ -79,24 +122,37 @@ for production. Anything else is trading correctness for speed without measuring
 
 ### 3.2 Full programme
 
+Full scope — nothing cut — on the A4000, with the PIC on GPU:
+
 | Campaign | Composition | Wall clock |
 |---|---|---|
-| DS-TRAIN + DS-TEST | 5 500 L2 solves | **11.5 days** (CPU, continuous) |
-| Surrogate build + audit | training + held-out validation | 1 day |
-| DS-BENCH | 13 scenarios × 200 realisations = 2 600 inversions | ~3.6 days |
-| DS-COVER | 1 000 inversions + SBC | ~1.4 days |
-| DS-ABLATE | 19 × 100 = 1 900 inversions | ~2.6 days |
-| DS-ENVELOPE | 2 000 inversions + FIM at each | ~4 days |
-| Verification suite | MMS, convergence, conservation | ~1 day |
-| **Total, single machine, serial** | | **≈ 25 days of continuous compute** |
+| DS-TRAIN + DS-TEST | 6 000 L2 solves, GPU | **~9 h** |
+| Surrogate training + audit | 80 POD outputs + held-out validation | ~1 h |
+| DS-BENCH | 13 scenarios × 200 = 2 600 inversions | ~7 h |
+| DS-COVER | 1 000 inversions + SBC | ~3 h |
+| DS-ABLATE | 19 × 100 = 1 900 inversions | ~5 h |
+| DS-ENVELOPE | 2 000 inversions + FIM at each | ~6 h |
+| Verification suite | MMS, convergence, conservation | ~2 h |
+| **Total, A4000, serial** | | **≈ 33 h ≈ 1.5 days** |
 
-**The programme fits on one A4000 plus a 16-core host in under a month of wall clock.** The
-CPU-bound L2 ensemble and the GPU-bound inversion campaigns overlap almost perfectly, so
-running them concurrently brings the realistic figure closer to **~18 days**.
+**The full programme — full envelope density, full ablation matrix, full surrogate — fits in a
+day and a half on hardware already in hand.** With the CPU-side fluid and verification work
+overlapping the GPU campaigns, ~28 h is realistic.
 
-This is the number that makes doc 00 C3 satisfiable, and it is why the L3 surrogate exists:
-without it, DS-ENVELOPE alone would require 2 000 × 10⁶ L2 solves, which is not a large number
-of days — it is geological.
+Two consequences worth stating plainly:
+
+1. **Nothing needs to be cut.** An earlier version of this plan proposed dropping the
+   surrogate and thinning the sweeps to fit a 3-day window. That was the correct response to a
+   CPU-bound PIC and is obsolete now. Moving the particle push to the GPU is a ~400-line
+   change that recovers the entire scope.
+2. **The L3 surrogate is still required**, and for the original reason: DS-ENVELOPE at
+   kinetic fidelity would need 2 000 × 10⁶ L2 solves. Fast PIC removes the *training* cost,
+   not the need for an emulator inside the sampler.
+
+> All GPU figures rest on an assumed throughput of ~3.2 × 10⁹ particle-steps/s on the A4000
+> (bandwidth-scaled). This is an **estimate, not a measurement**. Gate G-1.4 requires it to be
+> measured on day one and this table corrected. If it is 3× pessimistic the programme is ~4
+> days, which still fits; if 3× optimistic, revisit the scope cuts of doc 11 §9.
 
 ### 3.3 Memory feasibility
 
@@ -188,9 +244,10 @@ NVMe holds the working set; only the 46 GB of reduced artifacts is archived long
 
 | If | Then |
 |---|---|
-| The A4000 is delayed | Tier 0 minus the GPU is still viable: GP training and NUTS run on CPU at ~10× cost, extending the programme to ~8 weeks. **Nothing is blocked, only slowed** |
-| L2 proves slower than the 3 min estimate | Reduce DS-TRAIN to 2 500 points and accept a larger surrogate-error term in the budget (doc 06 §4, term 10); the trade is explicit and measurable |
-| Better compute arrives early | Move to Tier 1; re-run DS-TRAIN at higher density and tighten term 10 |
+| GPU PIC throughput is worse than estimated | Measured at G-1.4 before commitment. 3× pessimistic → ~4 days, still fits. Worse than that → apply the scope cuts of doc 11 §9 in the stated order |
+| FP32 particle push fails the §5 precision test | Fall back to FP64 on GPU (~1/32 rate) or CPU. This is the main single-point risk in the schedule; test it on day one |
+| The A40 becomes available | ~1.6× across the board (bandwidth 696 vs 448 GB/s). Welcome, not required |
+| Azure GPU quota is granted on the sponsored subscription | Useful only for running campaigns in parallel with local work. Not on the critical path |
 | Storage fills | Raw data is a cache — delete and regenerate |
 
 ---

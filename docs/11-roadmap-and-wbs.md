@@ -196,16 +196,25 @@ moment the L2 kernel passes G-2.1 — before the rest of P2 finishes.
 **Principle: reduce scope, never reduce honesty.** A smaller result that is correctly labelled
 beats a larger result that implies validation it does not have.
 
+**Compute is no longer the binding constraint.** With the PIC on GPU (doc 10 §3.2) the full
+programme is ~33 h on the A4000 already in hand. The constraint is now **build time**, so this
+list is ordered by what must be *written*, not by what must be *computed*.
+
 | Priority | Item | Why it is on the list |
 |---|---|---|
-| **1** | L0 + L1 forward, RP-1 only | Enough physics for a real closed loop |
-| **2** | OES + LIF forward models with genuine noise | Two channels demonstrate fusion; four are not needed to make the point |
-| **3** | Closed-loop T0 + T2 recovery at RP-1 | The core claim, demonstrated end to end |
-| **4** | Coverage test on ~100 cases | Uncertainty that has been *checked* — the strongest differentiator |
-| **5** | Ablation: drop LIF, show the CI inflate | The most persuasive 20 seconds available |
-| **6** | Comparative figure vs simulated probe | Converts "better than probes" into a measurement |
-| **7** | Minimal UI over stored artifacts | Makes it tangible without becoming a demo trap |
+| **1** | **JAX PIC kernel (1D3V electrostatic), GPU** | Everything downstream hangs off this. ~400 lines. Measure throughput immediately (G-1.4) |
+| **2** | L0 + L1 forward, RP-1 | Verification anchor and the cheap inversion model |
+| **3** | OES + LIF forward models with genuine noise | Two channels demonstrate fusion; add Thomson/interferometry if time allows |
+| **4** | Closed-loop T0 + T2 recovery at RP-1 | The core claim, end to end. **T0 is blocking** |
+| **5** | Coverage test, 400+ cases | Uncertainty that has been *checked* — the strongest differentiator. **Do not cut** |
+| **6** | Ablation: drop each channel, show the CI inflate | The most persuasive 20 seconds available |
+| **7** | Comparative figure vs simulated probe / RFEA | Converts "better than probes" into a measurement |
+| **8** | Surrogate + full envelope map | Now affordable; include if the build reaches it |
+| **9** | Minimal UI over stored artifacts | Makes it tangible without becoming a demo trap |
 | — | *Everything else* | Presented as the specified roadmap, backed by these documents |
+
+**If the schedule slips, cut in this order:** 9 → 8 → 7 → 3 (drop to one channel) → 6.
+**Never cut 5.**
 
 **What makes this defensible rather than thin:** the planning documents themselves are the
 deliverable that most teams will not have. Presenting a modest working system *plus* a
