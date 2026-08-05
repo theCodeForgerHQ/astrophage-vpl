@@ -1,0 +1,324 @@
+# LIF channel — doc 02 §5, doc 04 §3, doc 01 §5.1.
+#
+# Every number the laser-induced-fluorescence forward model needs. The rule of doc 08 §5
+# applies without exception here: `vpl.instruments.lif` contains no numeric literal with
+# physical meaning, so changing any value below is the only way to change the model.
+#
+# Two honest notes that a reader should have before using these entries:
+#
+#  1. **The doc 02 §5.3 probe scheme is internally inconsistent, and the inconsistency is
+#     carried here rather than silently resolved.** Doc 02 §5.3 names the transition
+#     `3d 4F_7/2 -> 4p 4D_5/2` and gives the wavelengths 668.614 nm (pump) and 442.72 nm
+#     (fluorescence). Those wavelengths belong to the *other* standard diode-accessible
+#     Ar II scheme, `3d 2G_9/2 -> 4p 2F_7/2`; the 4F/4D pair is the 611.5 nm / 461.0 nm
+#     scheme. The wavelengths are load-bearing (they fix the laser, the filter and the
+#     Doppler mapping) and the term symbols enter only through the Lande g factors, so
+#     the wavelengths are taken as specified and the term symbols are registered as
+#     separate entries that can be corrected in one place. Both assignments give a Zeeman
+#     scale within 10 % of doc 04 §3.3's "~70 MHz at 50 G", so the choice does not change
+#     any conclusion drawn here — but it would change a fitted `T_i` at the percent level.
+#
+#  2. **No Einstein coefficient is registered, because none could be sourced.** Doc 04
+#     §3.4 writes the saturation intensity with `A_21`. What is sourceable is the *total*
+#     radiative width of the upper level: doc 04 §3.3 tabulates a 5 MHz natural linewidth,
+#     which is `A_total / 2 pi`. `LIF.pump_branching_ratio` is the ratio `A_21 / A_total`
+#     that closes the gap; its nominal 1.0 makes `I_sat` an upper bound and therefore the
+#     modelled saturation parameter a *lower* bound, which is the conservative direction
+#     for the doc 04 §3.4 claim that the framework must handle the saturated regime.
+#     A NIST ASD query for the doc 02 §5.3 pump transition (doc 09 §2.2) replaces the
+#     sweep with a measured value, and this file is the only place it enters.
+
+# ── the probe transition (doc 02 §5.3) ──────────────────────────────────────────
+
+- id: LIF.pump_wavelength
+  description: >-
+    Vacuum wavelength of the Ar II pump transition. Fixes the laser (doc 02 LIF-L1), the
+    saturation intensity (doc 04 §3.4) and the Doppler mapping v_par = c (1 - nu_0/nu_L)
+    of doc 04 §3.2, so it is the single most load-bearing number in this file.
+  value: 668.614
+  units: nm
+  class: SPEC
+  source: "doc 02 §5.3 and LIF-L1 (Toptica DL pro 670 class, tunable ECDL at 668.6 nm)"
+  uncertainty: {type: absolute, value: 0.001}
+  affects: [LIF.saturation_intensity, LIF.doppler_mapping, LIF.zeeman_pattern]
+  category: instrument
+
+- id: LIF.fluorescence_wavelength
+  description: >-
+    Vacuum wavelength of the observed fluorescence branch, and the centre of the doc 02
+    LIF-D2 narrowband filter.
+  value: 442.72
+  units: nm
+  class: SPEC
+  source: "doc 02 §5.3 and LIF-D2 (442.7 nm, 3 nm FWHM, OD6 blocking at 668.6 nm)"
+  uncertainty: {type: absolute, value: 0.01}
+  affects: [LIF.photon_energy]
+  category: instrument
+
+- id: LIF.natural_linewidth
+  description: >-
+    Natural (radiative) FWHM of the upper level, i.e. A_total / 2 pi. Doc 04 §3.3
+    tabulates it as "~5 MHz" and calls it negligible against the ~734 MHz thermal Doppler
+    width; it is not negligible for the saturation intensity, which is what it is used
+    for here. Consistent with a radiative lifetime near 30 ns for an Ar II 4p level.
+  value: 5.0
+  units: MHz
+  class: PUBLISHED
+  source: "doc 04 §3.3 broadening budget; NIST ASD Ar II 4p lifetimes are of this order"
+  uncertainty: {type: relative, value: 0.20}
+  affects: [LIF.saturation_intensity, LIF.homogeneous_width]
+  category: instrument
+
+- id: LIF.pressure_broadening
+  description: >-
+    Collisional (pressure) contribution to the homogeneous FWHM at the RP-1 fill pressure.
+    Doc 04 §3.3 bounds it at "< 10 MHz at 5 mTorr"; the bound is taken as the nominal,
+    which widens the modelled homogeneous line and is therefore the conservative choice
+    for the doc 04 V-22 lineshape comparison.
+  value: 10.0
+  units: MHz
+  class: PUBLISHED
+  source: "doc 04 §3.3 broadening budget at RP-1 (doc 01 §2.1, 5 mTorr argon)"
+  uncertainty: {type: relative, value: 1.0}
+  affects: [LIF.homogeneous_width]
+  category: instrument
+
+- id: LIF.pump_branching_ratio
+  description: >-
+    A_21 / A_total for the pump transition — the factor that turns the sourceable total
+    radiative width into the Einstein coefficient doc 04 §3.4's saturation intensity
+    needs. See note 2 in the header: the nominal 1.0 is the upper bound on A_21 and
+    therefore the upper bound on I_sat, which understates saturation rather than
+    overstating it. Swept because it is not measured.
+  value: 1.0
+  units: dimensionless
+  class: DESIGN
+  source: "unsourced pending the doc 09 §2.2 NIST ASD query; swept over the full physical range"
+  sweep_range: [0.01, 1.0]
+  affects: [LIF.saturation_intensity]
+  category: instrument
+
+- id: LIF.quench_rate
+  description: >-
+    Collisional quenching rate Q of the upper level — the term of doc 04 §3.1's rate
+    equation that is not radiative. Doc 04 §3.3 bounds the collisional contribution to the
+    homogeneous width at < 10 MHz FWHM at 5 mTorr, i.e. Q < 2 pi x 10 MHz = 6.3e7 1/s. The
+    nominal is zero (quenching negligible at mTorr argon) and the sweep spans to that
+    bound, so the assumption is exercised by the doc 07 sensitivity study rather than
+    asserted in a docstring.
+  value: 0.0
+  units: 1/s
+  class: DESIGN
+  source: "bounded by doc 04 §3.3; nominal zero is a modelling choice, hence swept"
+  sweep_range: [0.0, 6.3e7]
+  affects: [LIF.relaxation_rate, LIF.saturation_intensity]
+  category: instrument
+
+# ── level designations, for the Zeeman pattern (doc 04 §3.3) ────────────────────
+#
+# Registered as numbers rather than parsed from a term symbol string: the registry holds
+# magnitudes (doc 02 §12), and J, L and S are the three magnitudes the Lande formula takes.
+
+- id: LIF.lower_level.J
+  description: Total angular momentum of the pumped lower level, 3d 4F_7/2 of doc 02 §5.3.
+  value: 3.5
+  units: dimensionless
+  class: MEASURED
+  source: "NIST ASD Ar II level designation, as doc 02 §5.3 names it (3d 4F_7/2)"
+  affects: [LIF.zeeman_pattern, LIF.degeneracy]
+  category: instrument
+
+- id: LIF.lower_level.L
+  description: Orbital angular momentum of the pumped lower level (F term, L = 3).
+  value: 3.0
+  units: dimensionless
+  class: MEASURED
+  source: "NIST ASD Ar II level designation, as doc 02 §5.3 names it (3d 4F_7/2)"
+  affects: [LIF.zeeman_pattern]
+  category: instrument
+
+- id: LIF.lower_level.S
+  description: Total spin of the pumped lower level (quartet term, S = 3/2).
+  value: 1.5
+  units: dimensionless
+  class: MEASURED
+  source: "NIST ASD Ar II level designation, as doc 02 §5.3 names it (3d 4F_7/2)"
+  affects: [LIF.zeeman_pattern]
+  category: instrument
+
+- id: LIF.upper_level.J
+  description: Total angular momentum of the laser-coupled upper level, 4p 4D_5/2.
+  value: 2.5
+  units: dimensionless
+  class: MEASURED
+  source: "NIST ASD Ar II level designation, as doc 02 §5.3 names it (4p 4D_5/2)"
+  affects: [LIF.zeeman_pattern, LIF.degeneracy]
+  category: instrument
+
+- id: LIF.upper_level.L
+  description: Orbital angular momentum of the upper level (D term, L = 2).
+  value: 2.0
+  units: dimensionless
+  class: MEASURED
+  source: "NIST ASD Ar II level designation, as doc 02 §5.3 names it (4p 4D_5/2)"
+  affects: [LIF.zeeman_pattern]
+  category: instrument
+
+- id: LIF.upper_level.S
+  description: Total spin of the upper level (quartet term, S = 3/2).
+  value: 1.5
+  units: dimensionless
+  class: MEASURED
+  source: "NIST ASD Ar II level designation, as doc 02 §5.3 names it (4p 4D_5/2)"
+  affects: [LIF.zeeman_pattern]
+  category: instrument
+
+# ── the laser and the beam (doc 02 §5.2) ────────────────────────────────────────
+
+- id: LIF.laser_power
+  description: >-
+    Optical power delivered to the measurement volume. Doc 02 LIF-L1 specifies ">= 20 mW"
+    at the laser; the nominal is that figure, with no allowance yet for isolator, AOM and
+    window losses, which makes the modelled saturation parameter an over-estimate at fixed
+    beam waist. Doc 07 F-13 sweeps the resulting S from 0.01 to 10, which is achieved in
+    practice by attenuating this.
+  value: 20.0
+  units: mW
+  class: SPEC
+  source: "doc 02 §5.2 LIF-L1 (Tunable ECDL, 668.6 nm, >= 20 mW)"
+  uncertainty: {type: relative, value: 0.05}
+  affects: [LIF.saturation_parameter]
+  category: instrument
+
+- id: LIF.beam_waist
+  description: >-
+    Gaussian beam waist at the measurement volume, as a 1/e^2 *radius*. Doc 02 LIF-O1
+    gives 75 um and LIF-O2 gives a 26 mm Rayleigh range; z_R = pi w0^2 / lambda returns
+    26.4 mm for w0 = 75 um as a radius and 6.6 mm for it as a diameter, which is what
+    fixes the convention. Sets the peak intensity 2P / (pi w0^2) and hence saturation.
+  value: 75.0
+  units: um
+  class: DESIGN
+  source: "doc 02 §5.2 LIF-O1, derived there from R-SPAT-1; cross-checked against LIF-O2"
+  sweep_range: [25.0, 200.0]
+  affects: [LIF.saturation_parameter, LIF.spatial_resolution]
+  category: instrument
+
+- id: LIF.laser_linewidth
+  description: >-
+    Laser FWHM linewidth. Doc 02 LIF-L2 specifies "< 1 MHz" and doc 04 §3.3 calls it
+    negligible against the Doppler width; it is carried anyway because it adds to the
+    homogeneous width of the observed lineshape, and "negligible" is a conclusion the
+    model should reproduce rather than assume.
+  value: 1.0
+  units: MHz
+  class: SPEC
+  source: "doc 02 §5.2 LIF-L2 (< 1 MHz, wavemeter-locked ECDL)"
+  uncertainty: {type: relative, value: 1.0}
+  affects: [LIF.homogeneous_width]
+  category: instrument
+
+- id: LIF.mode_hop_free_range
+  description: >-
+    Total mode-hop-free tuning span of the laser, centred on the transition. **This is the
+    constraint of doc 01 §5.1 and risk RS-03**: it is what makes full-energy IVDF
+    measurement inside a high-bias sheath unachievable with a scanning single-frequency
+    diode, and it is represented in the model as a hard limit on the reachable detuning
+    rather than as a caveat in prose.
+  value: 20.0
+  units: GHz
+  class: SPEC
+  source: "doc 02 §5.2 LIF-L3 (Toptica DL pro class); doc 01 §5.1 note on LIF-3"
+  uncertainty: {type: relative, value: 0.10}
+  affects: [LIF.velocity_window, LIF.energy_ceiling]
+  category: instrument
+
+- id: LIF.grazing_angle
+  description: >-
+    Angle between the laser propagation axis and the electrode plane. A beam parallel to
+    the electrode is blind to v_z (doc 02 §4.2 check 2); the grazing geometry projects v_z
+    onto the beam with sin(theta_L) = 0.259, and inverting that projection amplifies
+    velocity errors by 3.86x (doc 04 §3.2, doc 06 §4 item 5). A free design choice, and one
+    the trade is worth exploring: a steeper angle would shrink the amplification.
+  value: 15.0
+  units: deg
+  class: DESIGN
+  source: "doc 02 §5.2 LIF-O3 and §4.2 check 2; the alternative (normal incidence) is
+    geometrically impossible because the beam would pass through the electrode"
+  sweep_range: [1.0, 90.0]
+  affects: [LIF.doppler_mapping, LIF.velocity_window, LIF.energy_ceiling]
+  category: instrument
+
+# ── field, populations and calibration ──────────────────────────────────────────
+
+- id: LIF.magnetic_field
+  description: >-
+    Axial field from the optional Helmholtz pair. Doc 02 §3.2 gives the range as 0-100 G;
+    doc 04 §3.3 evaluates the Zeeman splitting at 50 G and finds ~70 MHz, "10 % of the
+    Doppler width — NOT negligible". Stored in millitesla because the shared unit registry
+    treats `gauss` as Gaussian-CGS and refuses to convert it to tesla; 50 G = 5 mT.
+  value: 5.0
+  units: mT
+  class: DESIGN
+  source: "doc 02 §3.2 (optional Helmholtz pair, 0-100 G axial); doc 04 §3.3 works at 50 G"
+  sweep_range: [0.0, 10.0]
+  affects: [LIF.zeeman_pattern]
+  category: instrument
+
+- id: LIF.metastable_fraction
+  description: >-
+    n_metastable / n_i — the fraction of the ion population the 3d level actually holds,
+    and per doc 02 §5.3 "the single largest systematic in LIF". Doc 05 §2.2 makes it an
+    inferred nuisance parameter, so this entry is the centre of its prior rather than a
+    constant the forward model is entitled to trust; doc 06 §4 budgets 5.0 % for it. The
+    sweep spans the range reported for low-pressure argon discharges.
+  value: 0.01
+  units: dimensionless
+  class: DESIGN
+  source: "doc 02 §5.3 and doc 05 §2.2 make this a free nuisance parameter, not a constant"
+  sweep_range: [1.0e-4, 0.1]
+  affects: [LIF.signal_amplitude]
+  category: instrument
+
+- id: LIF.frequency_axis_uncertainty
+  description: >-
+    One-sigma uncertainty of the laser frequency axis after wavemeter and etalon
+    calibration. Doc 02 §11 quotes 2 MHz and notes it corresponds to 1.3 m/s of
+    *unprojected* velocity, which the 3.86x geometric amplification of doc 02 §4.2 turns
+    into 5.0 m/s of v_z — still far below the R-ACC-4 requirement.
+  value: 2.0
+  units: MHz
+  class: SPEC
+  source: "doc 02 §11 (wavemeter + Fabry-Perot etalon); doc 05 §2.2 frequency-axis offset"
+  affects: [LIF.velocity_axis]
+  category: instrument
+
+- id: LIF.scale_uncertainty
+  description: >-
+    One-sigma relative uncertainty of the LIF amplitude scale as applied by the analysis
+    pipeline. Doc 02 §11 records that LIF is *not* absolutely calibrated, so this is not a
+    radiometric calibration: it is the uncertainty of the relative scale the estimated
+    calibration of doc 04 §7.3 carries, dominated by the metastable fraction that doc 06 §4
+    budgets at 5.0 %.
+  value: 0.05
+  units: dimensionless
+  class: PUBLISHED
+  source: "doc 06 §4 item 4 (LIF metastable fraction, 5.0 %, class B); doc 02 §11"
+  affects: [LIF.likelihood]
+  category: instrument
+
+- id: LIF.detection_floor_n_0
+  description: >-
+    Bulk density below which the LIF channel carries no information and must be modelled as
+    absent (doc 01 IF-6). **This is the weakest entry in this file and is labelled as such**:
+    the photon budget that would fix it is doc 02 §7 work outside WBS 2.6, so the value is a
+    modelling choice swept over four decades rather than a computed floor. It is registered
+    at all because doc 01 IF-6 requires the gate to exist and be explicit; an instrument with
+    no floor silently claims to see everything.
+  value: 1.0e16
+  units: m^-3
+  class: DESIGN
+  source: "placeholder pending the doc 02 §7 LIF photon budget; swept, never asserted"
+  sweep_range: [1.0e14, 1.0e18]
+  affects: [LIF.is_informative]
+  category: instrument

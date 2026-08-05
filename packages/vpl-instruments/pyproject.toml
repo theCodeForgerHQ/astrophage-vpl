@@ -1,0 +1,48 @@
+#  vpl-instruments — the measurement operator F2 of doc 04 §2-§5.
+#
+#  A plasma state in, an observable out. The package depends on vpl-physics because the
+#  collisional-radiative model of doc 04 §2.2 is driven by EEDF-integrated rate
+#  coefficients ("not a Maxwellian") and by NIST transition data, both of which already
+#  live there. It depends on vpl-core for the Instrument contract of doc 08 §4 and for
+#  the parameter registry that doc 08 §5 makes the sole source of numeric defaults.
+#
+#  It does **not** depend on vpl-inverse, and must not: doc 04 §1 layers the forward
+#  chain strictly, and doc 08 §1 principle 5 says layers do not leak. An instrument reads
+#  a PlasmaState and produces an Observable; it has no business knowing that anything is
+#  being inferred from it. `test_layering.py` asserts this against the import graph
+#  rather than leaving it to review.
+
+[project]
+name = "vpl-instruments"
+version = "0.1.0"
+description = "Astrophage VPL — the measurement operator F2: collisional-radiative emission, lineshapes and the spectrograph."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Team Astrophage" }]
+dependencies = [
+    "vpl-core",
+    # doc 04 §2.2's rate coefficients are integrals of LXCat cross sections over the
+    # solved EEDF, and doc 04 §2.1's A_ul and level data come from the NIST ASD loader.
+    # Both are vpl-physics. Reimplementing either here would be the doc 00 §6
+    # reimplementation trap with a package boundary drawn through the middle of it.
+    "vpl-physics",
+    "numpy>=2.1",
+    # doc 08 §2: SciPy is "buy". Three things here need it and none should be rewritten:
+    # the Faddeeva function for the Voigt profile (doc 04 §2.4), the exponential integral
+    # E_3 that closes the Holstein escape probability (doc 04 §2.3), and Gauss-Legendre
+    # nodes for the instrument-function convolution (doc 04 §6.1).
+    "scipy>=1.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vpl"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# PEP 561. `vpl` is an implicit namespace package, so without this marker an installed
+# wheel type-checks as Any and the doc 08 §4 Instrument contract stops being checked at
+# exactly the boundary it exists to guard.
+"src/vpl/instruments/py.typed" = "vpl/instruments/py.typed"

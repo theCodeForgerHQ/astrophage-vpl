@@ -1,0 +1,325 @@
+# OES channel — doc 02 §6, §11 and doc 04 §2, §5.
+#
+# Every number the optical-emission channel needs, once. doc 08 §5 makes this file the
+# sole source of them and vpl-lint enforces it, so a value that is not here cannot be
+# written into vpl.instruments.oes at all.
+#
+# Two conventions, both deliberate:
+#
+#   * ids are prefixed with the doc 02 §6.2 specification row they come from (OES-S1,
+#     OES-D3, ...) so that a reviewer can put this file beside that table and check it
+#     line by line. Rows doc 02 does not tabulate are prefixed `OES.`.
+#   * `OES.chamber_diameter` duplicates the doc 02 §3.1 chamber dimension rather than
+#     referring to a shared `chamber.*` entry, because no such entry exists yet and
+#     inventing one here would put a vacuum-vessel dimension in an instrument file that
+#     another channel would then have to import. When doc 02 §3's geometry is registered
+#     in its own right, this becomes an alias and the duplication is removed.
+
+# ── OES-S1: the spectrograph ─────────────────────────────────────────────────────
+
+- id: OES-S1.focal_length
+  description: Czerny-Turner focal length; sets the linear dispersion at the focal plane
+  value: 750.0
+  units: mm
+  class: SPEC
+  source: "doc 02 §6.2 OES-S1 — Princeton Instruments SP-2750 class, f = 750 mm, f/9.7"
+  affects: [oes.reciprocal_dispersion, oes.instrument_function]
+  category: instrument
+
+- id: OES-S1.f_number
+  description: >-
+    Working f-number of the spectrograph. Not used by the dispersion model; carried
+    because it fixes the collection solid angle the F3 layer of doc 04 §6 will need, and
+    because a specification row that is registered nowhere is a row nobody can check.
+  value: 9.7
+  units: dimensionless
+  class: SPEC
+  source: "doc 02 §6.2 OES-S1"
+  affects: [optics.etendue, oes.photon_budget]
+  category: instrument
+
+- id: OES-S1.deviation_half_angle
+  description: >-
+    Half the fixed angular deviation between the incident and diffracted arms of the
+    Czerny-Turner mount, with the diffracted arm at the larger angle from the grating
+    normal. doc 02 §6.2 does not tabulate it, but it is not free: with the OES-S2 grating
+    in first order it is what makes the reciprocal linear dispersion come out at the
+    0.62 nm/mm of OES-S3 at the blaze wavelength, and 6.3 deg is the value that does.
+    Registered as DESIGN and swept, because the specification pins the dispersion rather
+    than the geometry and a different mount reaching the same dispersion is admissible.
+  value: 6.29
+  units: degree
+  class: DESIGN
+  source: "doc 02 §6.2 OES-S1/OES-S3 — the mount angle reproducing the tabulated 0.62 nm/mm"
+  sweep_range: [0.0, 15.0]
+  affects: [oes.reciprocal_dispersion]
+  category: instrument
+
+# ── OES-S2: the grating ──────────────────────────────────────────────────────────
+
+- id: OES-S2.groove_density
+  description: Grating groove density; with the order it fixes the angular dispersion
+  value: 1800.0
+  units: 1 / mm
+  class: SPEC
+  source: "doc 02 §6.2 OES-S2 — 1800 gr/mm, blaze 500 nm"
+  affects: [oes.reciprocal_dispersion, oes.free_spectral_range]
+  category: instrument
+
+- id: OES-S2.blaze_wavelength
+  description: >-
+    Blaze wavelength. The dispersion is quoted at this wavelength in doc 02 OES-S3, so it
+    is also the point at which the mount angle above was fixed.
+  value: 500.0
+  units: nm
+  class: SPEC
+  source: "doc 02 §6.2 OES-S2"
+  affects: [oes.reciprocal_dispersion, oes.grating_efficiency]
+  category: instrument
+
+- id: OES-S2.diffraction_order
+  description: >-
+    Diffraction order the spectrograph is operated in. First order over the whole
+    434-812 nm line set of doc 02 §6.3; second order would double the dispersion and
+    halve the free spectral range, which is why it is swept rather than assumed.
+  value: 1.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 02 §6.1 — imaging mode over the full doc 02 §6.3 line set in one setting"
+  sweep_range: [1.0, 3.0]
+  affects: [oes.reciprocal_dispersion, oes.instrument_function]
+  category: instrument
+
+- id: OES-S3.reciprocal_dispersion
+  description: >-
+    Reciprocal linear dispersion at the blaze wavelength, as doc 02 §6.2 derives it. Held
+    here as the specification's own value so that the grating model can be checked
+    against it rather than merely reproduce it; see the test named in the package README.
+  value: 0.62
+  units: nm / mm
+  class: SPEC
+  source: "doc 02 §6.2 OES-S3 — derived from OES-S1 and OES-S2"
+  affects: [oes.instrument_function, oes.wavelength_axis]
+  category: instrument
+
+# ── OES-S4/S5: slit and imaging ──────────────────────────────────────────────────
+
+- id: OES-S4.slit_width
+  description: Entrance slit width; the geometric term in the instrument function
+  value: 20.0
+  units: um
+  class: SPEC
+  source: "doc 02 §6.2 OES-S4"
+  affects: [oes.instrument_function, oes.photon_budget]
+  category: instrument
+
+- id: OES-S4.instrument_fwhm
+  description: >-
+    Instrument-function FWHM doc 02 §6.2 states for the 20 um slit, and against which it
+    checks requirement OES-2 (<= 0.05 nm). It is 2.1x the slit-limited bandpass that
+    OES-S3 and OES-S4 imply on their own (0.62 nm/mm x 20 um = 0.0124 nm), so doc 02 is
+    carrying an unstated optical contribution; OES-S4.optical_fwhm is that residual, made
+    explicit. This entry is the target the assembled instrument function is checked
+    against.
+  value: 0.026
+  units: nm
+  class: SPEC
+  source: "doc 02 §6.2 OES-S4"
+  uncertainty: {type: relative, value: 0.05}
+  affects: [oes.instrument_function, oes.line_blending]
+  category: instrument
+
+- id: OES-S4.optical_fwhm
+  description: >-
+    Gaussian FWHM of the residual optical broadening — aberration, grating figure and
+    diffraction — that reconciles the 0.026 nm of OES-S4 with the 0.0124 nm slit-limited
+    bandpass of OES-S3 and OES-S4. doc 02 §6.2 does not decompose its number, so this is
+    a reconstruction of what it must contain rather than a datum, and it is swept from
+    zero (a perfect spectrograph, instrument function slit-limited) to a value that
+    doubles the stated width.
+  value: 0.02539
+  units: nm
+  class: DESIGN
+  source: "doc 02 §6.2 OES-S4 — the residual implied by the stated width; see description"
+  sweep_range: [0.0, 0.05]
+  affects: [oes.instrument_function]
+  category: instrument
+
+- id: OES-S4.instrument_lorentz_fraction
+  description: >-
+    Fraction of OES-S4.optical_fwhm carried by a Lorentzian rather than a Gaussian
+    component. doc 04 §6.1 requires the spectrograph instrument function to be a
+    "measured-style Voigt, not a delta", and doc 02 §11 fits one to the Hg/Ar lamp; a
+    real Czerny-Turner instrument function has weak wings that a pure Gaussian cannot
+    represent. Zero is admissible and is one end of the sweep.
+  value: 0.15
+  units: dimensionless
+  class: DESIGN
+  source: "doc 04 §6.1, doc 02 §11 — the instrument function is fitted as a Voigt"
+  sweep_range: [0.0, 0.5]
+  affects: [oes.instrument_function, oes.line_blending]
+  category: instrument
+
+- id: OES-S5.magnification
+  description: >-
+    Spatial magnification from the plasma to the entrance slit. doc 02 §6.1 uses the
+    spectrograph in imaging mode with the slit along the sheath normal, so this sets how
+    many detector rows one sheath thickness covers.
+  value: 0.5
+  units: dimensionless
+  class: SPEC
+  source: "doc 02 §6.2 OES-S5 — 90 um object to 45 um at the slit, ~3 pixels"
+  affects: [oes.spatial_resolution, requirement.R-SPAT-1]
+  category: instrument
+
+# ── OES-D1/D2/D3: the ICCD ───────────────────────────────────────────────────────
+
+- id: OES-D1.pixel_pitch
+  description: Detector pixel pitch; the second geometric term in the instrument function
+  value: 13.0
+  units: um
+  class: SPEC
+  source: "doc 02 §6.2 OES-D1 — gated ICCD, 1024 x 1024, 13 um pixels"
+  affects: [oes.instrument_function, oes.wavelength_axis]
+  category: instrument
+
+- id: OES-D1.n_pixels
+  description: Detector pixels along the dispersion axis; the length of the spectral axis
+  value: 1024.0
+  units: dimensionless
+  class: SPEC
+  source: "doc 02 §6.2 OES-D1"
+  affects: [oes.wavelength_axis, oes.spectral_coverage]
+  category: instrument
+
+- id: OES-D2.gate_width
+  description: >-
+    Minimum ICCD gate. doc 02 §10.1 pairs it with the 73.7 ns RF period to give the 2.7 %
+    duty cycle that sets the photon budget of a phase-resolved acquisition.
+  value: 2.0
+  units: ns
+  class: SPEC
+  source: "doc 02 §6.2 OES-D2 — meets R-TEMP-1"
+  affects: [oes.photon_budget, timing.phase_binning]
+  category: instrument
+
+- id: OES-D3.quantum_efficiency
+  description: >-
+    Gen III photocathode quantum efficiency at 500 nm. Used as a flat value across the
+    doc 02 §6.3 line set, which is a simplification: a Gen III cathode falls off beyond
+    ~750 nm, so the 811.53 and 763.51 nm photon budgets are optimistic. The wavelength
+    dependence belongs to vpl-detectors (doc 04 §7.1).
+  value: 0.20
+  units: dimensionless
+  class: SPEC
+  source: "doc 02 §6.2 OES-D3"
+  uncertainty: {type: relative, value: 0.10}
+  affects: [oes.photon_budget, oes.likelihood_regime]
+  category: instrument
+
+- id: OES-C1.radiometric_uncertainty
+  description: >-
+    One-sigma relative uncertainty of the absolute radiometric calibration — lamp,
+    transfer and window ageing combined. doc 04 §7.3 requires the pipeline to be handed
+    the estimated response rather than the true one, and this is the width of the
+    difference between them.
+  value: 0.06
+  units: dimensionless
+  class: SPEC
+  source: "doc 02 §11 — NIST-traceable tungsten-halogen lamp on the NIST FEL scale"
+  affects: [oes.absolute_scale, uq.calibration_term]
+  category: instrument
+
+- id: OES-C1.wavelength_uncertainty
+  description: >-
+    One-sigma uncertainty of the wavelength axis after the Hg/Ar pencil-lamp fit. doc 02
+    §11 calls it negligible at < 0.005 nm; registered anyway, because a term that is
+    negligible for a stated reason is auditable and one that is absent is not.
+  value: 0.005
+  units: nm
+  class: SPEC
+  source: "doc 02 §11 — Hg/Ar pencil lamp against the NIST line list"
+  affects: [oes.wavelength_axis, uq.calibration_term]
+  category: instrument
+
+# ── OES.*: modelling choices doc 02 does not tabulate ────────────────────────────
+
+- id: OES.chamber_diameter
+  description: >-
+    Internal chamber diameter. Two things in this package use it: the chord the emissivity
+    is integrated along to give a radiance, and the path length the Holstein-Biberman
+    escape factors of doc 04 §2.3 are computed over. Both are the same 400 mm, and both
+    are approximations of a cylinder by a slab of its diameter — see
+    vpl.instruments.oes.escape for the bound that costs.
+  value: 400.0
+  units: mm
+  class: DESIGN
+  source: "doc 02 §3.1 — internal diameter; doc 02 §9 IF-P2 uses the same value as a chord"
+  sweep_range: [100.0, 1000.0]
+  affects: [oes.radiance, oes.escape_factor]
+  category: instrument
+
+- id: OES.poisson_gaussian_threshold
+  description: >-
+    Photoelectron count above which the OES likelihood switches from Poisson to Gaussian.
+    doc 05 §3.1 specifies the switch and puts it at "~100 pe"; it is registered as a
+    design choice because doc 05 §3.1 also says it is configured, and the Gaussian
+    approximation to a Poisson of mean 100 is already good to better than a percent in
+    the tails that matter.
+  value: 100.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 05 §3.1 — 'Poisson for weak lines; Gaussian for bright lines above ~100 pe'"
+  sweep_range: [10.0, 1000.0]
+  affects: [inverse.likelihood, oes.uncertainty]
+  category: instrument
+
+- id: OES.detection_floor_n_0
+  description: >-
+    Bulk density below which the OES channel is modelled as absent rather than as a weak
+    measurement — the doc 01 IF-6 gate applied to this channel. Two decades below RP-1:
+    the line emissivity is linear in n_e at fixed T_e, so a 2 ns gate on a 1e15 m^-3
+    plasma delivers of order one photoelectron per line per accumulation and the ratios
+    that carry T_e are pure counting noise. A design choice, and swept, because unlike
+    the interferometer floor of doc 01 §5.4 it is not derived from a single closed-form
+    sensitivity.
+  value: 1.0e+15
+  units: m**-3
+  class: DESIGN
+  source: "doc 01 IF-6 applied to OES; the lower end of the R-ENV-1 envelope of doc 01 §2.4"
+  sweep_range: [1.0e+13, 1.0e+17]
+  affects: [inverse.likelihood, oes.is_informative]
+  category: instrument
+
+- id: OES.metastable_wall_quenching
+  description: >-
+    Probability that an Ar metastable reaching the wall is quenched there. doc 04 §2.2's
+    nu_wall is diffusion to the wall times this probability; doc 09 §2.3 records the
+    literature range as 0.1-1.0 and classes it DESIGN for exactly that reason. It matters:
+    the 811.53 and 763.51 nm lines of doc 02 §6.3 are metastable-coupled, so the whole
+    T_e / n_metastable separation runs through this number.
+  value: 1.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 09 §2.3 — literature range 0.1-1.0, swept"
+  sweep_range: [0.1, 1.0]
+  affects: [oes.metastable_density, oes.line_ratios]
+  category: instrument
+
+- id: OES.slit_height
+  description: >-
+    Illuminated height of the entrance slit, along the imaged sheath-normal direction.
+    doc 02 §6.2 does not tabulate it — it tabulates OES-S5's 0.5x magnification and the
+    90 um object it resolves — so this is a design choice. With OES-S4.slit_width and
+    OES-S1.f_number it fixes the etendue, which is the only place it enters: the
+    photoelectron count, and therefore the photon shot noise. A proper etendue is a ray
+    trace (doc 04 §6.1, bought as Raysect in vpl-optics); this is the thin-lens stand-in
+    and is swept over a factor of twenty because the answer it feeds is a noise level and
+    not a signal.
+  value: 5.0
+  units: mm
+  class: DESIGN
+  source: "doc 02 §6.1 imaging mode; stand-in for the doc 04 §6.1 ray-traced etendue"
+  sweep_range: [0.5, 20.0]
+  affects: [oes.photon_budget, oes.shot_noise, inverse.likelihood]
+  category: instrument
