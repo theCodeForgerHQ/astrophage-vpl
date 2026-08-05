@@ -1,0 +1,152 @@
+#  Astrophage VPL — workspace root.
+#
+#  This file is not a distributable package. It exists to (a) declare the uv
+#  workspace, (b) hold the single source of truth for lint / type / test
+#  configuration, and (c) pin the development toolchain.
+#
+#  Package layout and the build-vs-buy policy are specified in docs/08-software-architecture.md.
+#  The choice of uv as workspace manager is recorded in docs/adr/ADR-006-toolchain.md.
+
+[project]
+name = "astrophage-vpl-workspace"
+version = "0.0.0"
+description = "Workspace root for the Astrophage VPL monorepo — not published."
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workspace
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tool.uv.workspace]
+members = ["packages/*", "plugins/*"]
+
+[tool.uv.sources]
+vpl-core = { workspace = true }
+vpl-physics = { workspace = true }
+vpl-optics = { workspace = true }
+vpl-instruments = { workspace = true }
+vpl-detectors = { workspace = true }
+vpl-inverse = { workspace = true }
+vpl-uq = { workspace = true }
+vpl-validation = { workspace = true }
+vpl-experiment = { workspace = true }
+vpl-publish = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "hypothesis>=6.122",
+    "mypy>=1.14",
+    "ruff>=0.9",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lint / format
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["packages/*/src", "packages/*/tests"]
+# Ruff formats fenced code blocks inside Markdown. The planning documents (docs/) are
+# Baseline artifacts whose listings must match what was reviewed and signed off; a
+# formatter silently rewriting them would corrupt the record. Excluded deliberately.
+extend-exclude = ["docs/", "refs/"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "SIM",  # flake8-simplify
+    "ARG",  # flake8-unused-arguments
+    "PTH",  # flake8-use-pathlib
+    "NPY",  # numpy-specific
+    "RUF",  # ruff-specific
+]
+ignore = [
+    # Physics code uses single-character names that match the published equations.
+    # Renaming `n_e` to `electron_density` in a discretised operator makes the code
+    # harder to check against the paper, not easier.
+    "E741",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests are allowed magic numbers and long lines in tabulated expectations.
+"**/tests/**" = ["ARG001", "ARG002"]
+
+[tool.ruff.lint.pep8-naming]
+# Physics conventions: `T_e`, `n_0`, `V_w`, `Gamma_E` are correct names here.
+ignore-names = ["*_e", "*_i", "*_g", "*_w", "*_s", "*_D", "*_E", "*_L", "*_RF", "N_*", "T_*", "E_*"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Types
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+mypy_path = "packages/vpl-core/src"
+namespace_packages = true
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+# Third-party scientific stack ships incomplete or absent stubs.
+module = ["scipy.*", "h5py.*", "zarr.*", "pint.*", "matplotlib.*"]
+ignore_missing_imports = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["packages"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+]
+markers = [
+    # doc 08 §8: physics correctness tests are reported separately from software tests.
+    "physics: physics verification test (MMS, convergence, conservation, analytic limits)",
+    "statistical: statistical calibration test (coverage, SBC) — slow, sampling-based",
+    "integration: full manifest-to-artifact round trip",
+    "slow: takes more than ~10 s; excluded from the per-commit gate",
+    "gpu: requires a CUDA device; skipped on machines without one",
+    "fenicsx: requires the FEniCSx/PETSc stack; skipped where unavailable",
+]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+source = ["packages"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+    "class .*\\(Protocol\\):",
+    "\\.\\.\\.",
+]

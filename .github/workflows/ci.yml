@@ -1,0 +1,67 @@
+#  Per-commit gate — doc 07 §7 requires this to stay under 10 minutes.
+#
+#  The heavier tiers (verification suite on PR, nightly benchmarks, weekly full suite)
+#  are separate workflows added as the phases that produce them land. Adding an empty
+#  nightly job now would only produce a green badge for work that does not exist.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  lint:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --all-groups
+      - name: ruff check
+        run: uv run ruff check --output-format=github .
+      - name: ruff format
+        run: uv run ruff format --check .
+
+  types:
+    name: Types (mypy --strict on vpl-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --all-groups
+      # doc 08 §12: --strict is required on vpl-core specifically. The core is the
+      # contract layer; an untyped contract is not a contract.
+      - run: uv run mypy packages/vpl-core/src
+
+  test:
+    name: Tests and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --all-groups
+      # doc 08 §8: physics correctness tests are reported separately from software
+      # correctness tests. 100% line coverage of a solver that silently dropped to
+      # first order is a passing suite and a broken program.
+      - name: Software tests
+        run: uv run pytest -m "not physics and not slow" --cov --cov-report=term-missing --cov-report=xml
+      - name: Physics verification tests
+        run: uv run pytest -m "physics and not slow" -v
+      - name: Coverage gate (vpl-core >= 80%, doc 00 E5)
+        run: uv run coverage report --include="packages/vpl-core/*" --fail-under=80

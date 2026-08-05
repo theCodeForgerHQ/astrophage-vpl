@@ -1,0 +1,32 @@
+#  vpl-core — protocols, state types, units, registry, provenance.
+#
+#  doc 08 §1 principle 1: "the core depends only on protocols". This package therefore
+#  has no scientific dependency heavier than NumPy. If a dependency here ever requires
+#  a compiler, something has gone wrong with the layering.
+
+[project]
+name = "vpl-core"
+version = "0.1.0"
+description = "Astrophage VPL — core protocols, state model, units and provenance."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Team Astrophage" }]
+dependencies = [
+    "numpy>=2.1",
+    "pint>=0.24",
+]
+
+[project.optional-dependencies]
+# Kept out of the base install so that `pip install vpl-core` stays light (doc 08 §3).
+storage = [
+    "h5py>=3.12",
+    "zarr>=2.18",
+    "pyarrow>=18.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vpl"]
