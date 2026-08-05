@@ -1,0 +1,56 @@
+# doc 08 §6's own example manifest, reproduced verbatim.
+#
+# It is here as an executable conformance test of the schema rather than as a runnable
+# experiment: every block of it must parse and validate, and `vpl run` must then refuse it
+# by naming the stages that do not exist yet (instruments, noise, inverse, validation) —
+# loudly, rather than by quietly running the half of it that does exist.
+#
+# The one departure from the printed document is that `calibration: estimated` is written
+# unquoted there and so is `estimated` here; had the document written `true`, YAML would
+# have produced a boolean rather than the mode name. See `vpl.experiment.manifest.schema`.
+
+experiment:
+  name: b02-reference-operating-point
+  description: Closed-loop validation at RP-1, honest tier
+  tier: T2
+  seed: 20260804
+
+plasma:
+  gas: argon
+  pressure: {value: 5.0, units: mTorr}
+  n0: {value: 1.0e17, units: m^-3}
+  Te: {value: 3.0, units: eV}
+  bias: {mode: dc, value: -250.0, units: V}
+
+forward:
+  solver: vpl.physics.kinetic.pic1d3v      # truth generator
+  mesh: {dz: lambda_D/2, grading: wall_refined_A}
+  n_ppc: 1000
+
+instruments:
+  - {id: oes,     enabled: true,  config: configs/instruments/oes_iccd.yaml}
+  - {id: lif,     enabled: true,  config: configs/instruments/lif_ecdl.yaml}
+  - {id: thomson, enabled: true,  config: configs/instruments/thomson_yag.yaml}
+  - {id: interf,  enabled: true,  config: configs/instruments/interf_co2.yaml}
+
+noise:
+  enabled_sources: [N1, N2, N3, N5, N6, N7, N8, N9, N12, N14, N15, N17, N18]
+  calibration: estimated            # NOT 'true' — doc 04 §7.3
+
+inverse:
+  model: vpl.physics.surrogate.gp          # deliberately != forward.solver (doc 05 §7.1)
+  mesh: {dz: lambda_D/3, grading: wall_refined_B}
+  engine: numpyro_nuts
+  draws: 4000
+  chains: 4
+  parameters: {control: all, nuisance: all, discrepancy: {n_basis: 12}}
+
+validation:
+  seal_truth: true
+  metrics: [rel_error, coverage, crps, wasserstein_iedf, fim_condition]
+  n_repeats: 200
+
+outputs:
+  artifacts: [posterior, diagnostics, identifiability, error_budget]
+  figures: [flux_profile, iedf_comparison, reliability_diagram, fim_spectrum]
+  report: true

@@ -15,6 +15,7 @@ constraint (doc 00 §4), requires an ADR.
 | [ADR-005](ADR-005-posterior-storage.md) | Posterior representation on disk | **Open** | P3 storage layer |
 | [ADR-006](ADR-006-toolchain.md) | Workspace, environment and formatter toolchain | **Accepted** | P1 (everything) |
 | [ADR-007](ADR-007-child-langmuir-thickness.md) | Which density sets lambda_D in the Child-Langmuir thickness | **Accepted** | P1 (V-03), and every quantity derived from s |
+| [ADR-008](ADR-008-manifest-substrate.md) | Manifest substrate: OmegaConf now, Hydra at the sweep layer | **Accepted** | P1 (G-1.3) |
 
 ## Status values
 

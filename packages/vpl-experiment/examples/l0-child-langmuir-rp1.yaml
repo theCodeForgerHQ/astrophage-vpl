@@ -1,0 +1,31 @@
+# The smallest manifest that runs today — doc 08 §6.
+#
+# L0 analytic sheath at the reference operating point RP-1 (doc 01 §2.1). Tier T0
+# (doc 05 §7.2): same model, no noise, no inversion. That is the only tier an L0-only
+# framework can honestly claim, and stating T2 here would be the project defect doc 05
+# §7.2 names.
+#
+# Its Gamma_E is the 6.6 kW/m^2 of doc 03 §2.3 — verification gate V-03, "the number every
+# other model must reproduce in this limit".
+
+experiment:
+  name: l0-child-langmuir-rp1
+  description: L0 analytic sheath at RP-1. Forward only; the V-03 anchor.
+  tier: T0
+  seed: 20260805
+
+plasma:
+  gas: argon
+  pressure: {value: 5.0, units: mTorr}
+  n0: {value: 1.0e17, units: m^-3}
+  Te: {value: 3.0, units: eV}
+  bias: {mode: dc, value: -250.0, units: V}
+
+forward:
+  solver: vpl.physics.analytic.sheath
+  model: child_langmuir
+
+outputs:
+  artifacts: [plasma_state, metrics]
+  figures: []
+  report: false

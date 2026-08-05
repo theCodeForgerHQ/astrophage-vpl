@@ -180,6 +180,32 @@ def _empty_traceability_registry() -> Iterator[None]:
 # ── fakes: complete implementations of each doc 08 §4 protocol ──────────────────────
 
 
+class SolverDemandingATimeGrid:
+    """Structurally a ForwardSolver, but its ``solve`` refuses a steady request.
+
+    doc 08 §4 declares ``t: TimeGrid``. Because parameter types are contravariant, a
+    solver written to that literal signature is *not* assignable to the widened protocol
+    — which is the whole reason the widening had to be deliberate rather than incidental.
+    """
+
+    def configure(self, cfg: SolverConfig) -> None: ...
+
+    def solve(self, params: PlasmaParams, t: TimeGrid) -> PlasmaState:
+        raise NotImplementedError
+
+    def flux(self, state: PlasmaState, z: float) -> IonEnergyFlux:
+        raise NotImplementedError
+
+    def fidelity(self) -> Fidelity:
+        return Fidelity.L1
+
+    def cost_estimate(self, cfg: SolverConfig) -> CostEstimate:
+        raise NotImplementedError
+
+    def metadata(self) -> SolverMetadata:
+        raise NotImplementedError
+
+
 class FakeSolver:
     """A ForwardSolver that computes nothing — the contract, and only the contract."""
 
@@ -189,9 +215,9 @@ class FakeSolver:
     def configure(self, cfg: SolverConfig) -> None:
         self._cfg = cfg
 
-    def solve(self, params: PlasmaParams, t: TimeGrid) -> PlasmaState:
+    def solve(self, params: PlasmaParams, t: TimeGrid | None) -> PlasmaState:
         grid = SpatialGrid.uniform(length=Q_(20.0, "mm"), n_points=4)
-        shape = (t.n_points, grid.n_points)
+        shape = (grid.n_points,) if t is None else (t.n_points, grid.n_points)
         spec = {"n_e": "m**-3", "n_i": "m**-3", "Phi": "V", "T_e": "eV"}
         return PlasmaState(
             params=params,
@@ -1686,6 +1712,25 @@ class TestForwardSolverProtocol:
         # protocol stopped constraining the return type this line would fail the build.
         assert isinstance(SolverReturningBareFloatFlux(), ForwardSolver)
         _requires_solver(SolverReturningBareFloatFlux())  # type: ignore[arg-type]
+
+    def test_a_solver_that_demands_a_time_grid_is_rejected_by_the_type_checker(
+        self,
+    ) -> None:
+        # The reason ForwardSolver.solve was widened from doc 08 §4's literal
+        # ``t: TimeGrid``. Parameter types are contravariant, so a solver that *insists*
+        # on a TimeGrid cannot stand in for one that accepts None — and L0 has no time
+        # dependence at all (doc 03 §1), so demanding one would make the analytic level
+        # unable to implement the contract every level is supposed to share (doc 00 E1).
+        # The ignore is the assertion: warn_unused_ignores is part of --strict.
+        assert isinstance(SolverDemandingATimeGrid(), ForwardSolver)
+        _requires_solver(SolverDemandingATimeGrid())  # type: ignore[arg-type]
+
+    def test_a_steady_solve_returns_a_steady_state(self, params: PlasmaParams) -> None:
+        solver: ForwardSolver = FakeSolver()
+
+        state = solver.solve(params, None)
+
+        assert state.is_steady is True
 
     def test_the_contract_composes_end_to_end(self, params: PlasmaParams) -> None:
         solver: ForwardSolver = FakeSolver()

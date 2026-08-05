@@ -390,8 +390,24 @@ class ForwardSolver(Protocol):
         """Apply the ``forward:`` block of a manifest — doc 08 §6."""
         ...
 
-    def solve(self, params: PlasmaParams, t: TimeGrid) -> PlasmaState:
-        """Advance the plasma over ``t`` and return the resulting state."""
+    def solve(self, params: PlasmaParams, t: TimeGrid | None) -> PlasmaState:
+        """Advance the plasma over ``t``, or solve for the steady state if ``t`` is None.
+
+        **Widened from doc 08 §4, deliberately.** Doc 08 §4 declares ``t: TimeGrid`` with
+        no ``None``, which makes a steady solve inexpressible — and the rest of the data
+        model says the opposite everywhere it touches the question:
+        ``PlasmaState.time`` is ``TimeGrid | None``, ``ScalarField`` is ``(n_z,)`` when
+        steady, and ``IonEnergyFlux`` carries ``is_steady``. L0 has no time dependence at
+        all (doc 03 §1) and L1's steady solve is the workhorse for sweeps.
+
+        Because parameter types are contravariant, this matters more than a docstring
+        note: a solver written to doc 08 §4's literal signature is *not* assignable here.
+        The alternative — demand a ``TimeGrid`` and have steady solvers ignore it — is a
+        silently-discarded argument, which is the failure the manifest's unknown-key rule
+        exists to prevent, arriving through the contract instead of the schema.
+
+        Recorded in ADR-008. Doc 08 §4 should adopt the optional form when next revised.
+        """
         ...
 
     def flux(self, state: PlasmaState, z: float) -> IonEnergyFlux:

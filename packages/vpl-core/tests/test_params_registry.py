@@ -278,3 +278,89 @@ class TestShippedRegistry:
         ]
 
         assert offenders == []
+
+
+class TestRobustnessOfDiscovery:
+    """Found on the reference machine, not on the laptop.
+
+    doc 10 §1 makes the A4000 box the reference machine, and the first full run there
+    failed at import with ``UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa3``.
+    The cause was a pair of macOS AppleDouble sidecars — ``._physics.yaml`` and friends,
+    binary files that a ``*.yaml`` glob happily matches — riding along in the transfer.
+
+    Two separate defects, both worth fixing rather than blaming on the transfer:
+    the loader treated any name-matching file as a registry file, and the failure
+    surfaced as a decoding error from ``pathlib`` with no mention of the registry at all.
+    """
+
+    def test_dotfiles_are_not_registry_files(self, tmp_path: Path) -> None:
+        # AppleDouble sidecars, editor swap files and partial downloads all take this
+        # shape. A registry file is something a person wrote and committed.
+        (tmp_path / "._physics.yaml").write_bytes(b"\x00\x02\x00\x00\x00\xa3\x00\x00")
+        good = _write(tmp_path, VALID_ENTRY, "physics.yaml")
+
+        registry = ParameterRegistry.load(sorted(tmp_path.glob("*.yaml")))
+
+        assert len(registry) == 1
+        assert registry["TS-L1.energy"].defined_in == good
+
+    def test_a_file_that_is_not_utf8_names_the_file_and_the_registry(self, tmp_path: Path) -> None:
+        # A bare UnicodeDecodeError from pathlib says nothing about what was being
+        # loaded or why. The registry is the single source of truth (doc 08 §5); when it
+        # fails to load, the message has to start there.
+        bad = tmp_path / "physics.yaml"
+        bad.write_bytes(b"- id: x\n  value: \xa3\n")
+
+        with pytest.raises(ValueError, match=r"physics\.yaml"):
+            ParameterRegistry.load([bad])
+
+    def test_files_are_read_as_utf8_regardless_of_locale(self, tmp_path: Path) -> None:
+        # Python's text mode defaults to the *locale* encoding, so a machine with
+        # LANG=C reads these files as ASCII and the em dashes and section signs
+        # throughout the registry become a crash. doc 00 E3 promises reproducibility;
+        # a load that depends on an environment variable does not deliver it.
+        text = VALID_ENTRY.replace("Nd:YAG pulse energy", "Nd:YAG pulse energy — doc 02 §12")
+        path = tmp_path / "physics.yaml"
+        path.write_text(text, encoding="utf-8")
+
+        registry = ParameterRegistry.load([path])
+
+        assert "§12" in registry["TS-L1.energy"].description
+
+
+class TestTheYamlExponentTrap:
+    """PyYAML implements YAML 1.1, whose float resolver requires a *signed* exponent.
+
+    ``1.0e17`` therefore loads as the **string** ``"1.0e17"``, while ``1.0e+17`` and
+    ``5.0e-19`` load as floats. Found while building the manifest engine, where it is
+    fatal — doc 08 §6's own example manifest writes ``n0: {value: 1.0e17}``, so a
+    PyYAML-based manifest reader could not parse the example in its own specification.
+
+    The registry survives it only because every value goes through ``float()``, which
+    coerces the string back. That is load-bearing rather than incidental, so it is pinned
+    here: a future refactor that passes the parsed value through unconverted would turn
+    the reference density of doc 01 §2.1 into a string, and ``Q_("1.0e17", "m**-3")``
+    fails somewhere far from the cause.
+    """
+
+    def test_pyyaml_really_does_misparse_an_unsigned_exponent(self) -> None:
+        import yaml
+
+        assert yaml.safe_load("a: 1.0e17\n")["a"] == "1.0e17"
+        assert yaml.safe_load("a: 1.0e+17\n")["a"] == 1.0e17
+
+    def test_an_unsigned_exponent_still_loads_as_a_number(self, tmp_path: Path) -> None:
+        text = (
+            VALID_ENTRY.replace("value: 0.5", "value: 1.0e17")
+            .replace("sweep_range: [0.1, 2.0]", "sweep_range: [1.0e15, 1.0e19]")
+            .replace("units: J", "units: m**-3")
+        )
+
+        registry = ParameterRegistry.load([_write(tmp_path, text)])
+
+        assert isinstance(registry["TS-L1.energy"].value, float)
+        assert registry.value_in("TS-L1.energy", "m**-3") == pytest.approx(1e17)
+
+    def test_the_shipped_reference_density_is_a_float_not_a_string(self) -> None:
+        # The one that would actually bite: operating-point.yaml writes `1.0e17`.
+        assert isinstance(default_registry()["RP1.n_0"].value, float)
