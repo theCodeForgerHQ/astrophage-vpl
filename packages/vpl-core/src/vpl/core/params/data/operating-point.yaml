@@ -1,0 +1,87 @@
+# Reference operating point RP-1 — doc 01 §2.1, and the envelope of doc 01 §2.4.
+#
+# Every quantitative requirement in the project is derived at RP-1, so it lives here
+# once rather than being retyped into whichever module needs it next. The sweep_range
+# on each entry is the *operating envelope* from R-ENV-1..4, not a numerical tolerance:
+# these are the bounds the identifiability map (doc 00 S5) is drawn over.
+#
+# All RP-1 values are DESIGN class. doc 01 §2.1 marks them so, and doc 09 §1 requires
+# every DESIGN entry to be swept — which is exactly what B-14 does.
+
+- id: RP1.pressure
+  description: Neutral argon fill pressure at the reference operating point
+  value: 5.0
+  units: mTorr
+  class: DESIGN
+  source: "doc 01 §2.1 — chosen to sit in the collisionless-to-collisional transition"
+  sweep_range: [0.5, 100.0]
+  affects: [physics.collisionality, physics.cx_mean_free_path, oes.emissivity]
+  category: operating_point
+
+- id: RP1.T_g
+  description: Neutral gas temperature; sets neutral density through the ideal gas law
+  value: 300.0
+  units: K
+  class: DESIGN
+  source: "doc 01 §2.1 — room temperature, gas heating neglected (doc 03 §8 A4)"
+  uncertainty: {type: relative, value: 0.05}
+  sweep_range: [250.0, 600.0]
+  affects: [physics.neutral_density, lif.doppler_width]
+  category: operating_point
+
+- id: RP1.n_0
+  description: Bulk plasma density at the reference operating point
+  value: 1.0e17
+  units: m**-3
+  class: DESIGN
+  source: "doc 01 §2.1 — representative of both etch reactors and EP thruster plumes"
+  sweep_range: [1.0e15, 1.0e19]
+  affects: [physics.debye_length, physics.ion_flux, thomson.photon_budget, interf.phase]
+  category: operating_point
+
+- id: RP1.T_e
+  description: Bulk electron temperature at the reference operating point
+  value: 3.0
+  units: eV
+  class: DESIGN
+  source: "doc 01 §2.1"
+  sweep_range: [1.0, 10.0]
+  affects: [physics.bohm_speed, physics.debye_length, physics.ion_flux, oes.line_ratios]
+  category: operating_point
+
+- id: RP1.T_i
+  description: Ion temperature at the reference operating point, taken equal to T_g
+  value: 0.05
+  units: eV
+  class: DESIGN
+  source: "doc 01 §2.1 — approximately the gas temperature at these pressures"
+  sweep_range: [0.02, 0.5]
+  affects: [physics.bohm_speed, lif.thermal_width]
+  category: operating_point
+
+- id: RP1.bias
+  description: >-
+    Applied electrode potential at the reference operating point, signed. Negative for a
+    biased electrode. The positive sheath potential drop is its magnitude — see
+    vpl.core.state.params for why both conventions exist in the specification.
+  value: -250.0
+  units: V
+  class: DESIGN
+  source: "doc 01 §2.1"
+  uncertainty: {type: relative, value: 0.01}
+  sweep_range: [-1000.0, 0.0]
+  affects: [physics.sheath_thickness, physics.ion_energy_flux, lif.tuning_range]
+  category: operating_point
+
+- id: RP1.rf_frequency
+  description: >-
+    Bias drive frequency for the RF regimes. doc 01 §2.3 shows the ion transit time
+    (26 ns) is comparable to this period (73.7 ns), which is what makes time resolution
+    a derived requirement rather than a slogan.
+  value: 13.56
+  units: MHz
+  class: DESIGN
+  source: "doc 02 §3.2 — industry-standard drive frequency"
+  sweep_range: [1.0, 100.0]
+  affects: [physics.rf_sheath, timing.phase_binning]
+  category: operating_point

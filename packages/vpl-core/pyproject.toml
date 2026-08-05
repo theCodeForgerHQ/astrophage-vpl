@@ -18,6 +18,9 @@ dependencies = [
     # never hand-typed. A mistyped electron mass is plausible, undetectable and
     # catastrophic. SciPy is already "buy" in the doc 08 §2 table.
     "scipy>=1.14",
+    # The parameter registry (doc 02 §12) is YAML. OmegaConf/Hydra arrive with the
+    # manifest engine; the registry only needs a safe loader, and vpl-core stays light.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -34,3 +37,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vpl"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# The registry data must travel with the package, or an installed wheel has no
+# source of numeric defaults at all (doc 08 §5).
+"src/vpl/core/params/data" = "vpl/core/params/data"

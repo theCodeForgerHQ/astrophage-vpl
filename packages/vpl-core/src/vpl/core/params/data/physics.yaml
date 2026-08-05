@@ -1,0 +1,124 @@
+# Physics constants and modelling conventions — docs 03 and 09.
+#
+# doc 09 §1 sets the target: zero ASSUMED entries in the physics-constants and
+# atomic-data categories before Phase 2 exit. A test asserts that from the start, so the
+# count can only be driven up deliberately and never drift up by accident.
+#
+# Fundamental constants (e, k_B, epsilon_0, m_e) are NOT here. doc 09 §2.5 requires them
+# to come from CODATA via scipy.constants, so they live in vpl.core.constants where they
+# are re-exported rather than re-typed.
+
+# ── species masses ───────────────────────────────────────────────────────────────
+
+- id: species.Ar.mass
+  description: Standard atomic weight of argon; the ion mass used for Ar+
+  value: 39.948
+  units: u
+  class: MEASURED
+  source: "CIAAW standard atomic weights 2021; NIST atomic weights and isotopic compositions"
+  uncertainty: {type: absolute, value: 0.001}
+  affects: [physics.bohm_speed, physics.ion_energy_flux, physics.cx_cross_section]
+  category: physics
+
+- id: species.Xe.mass
+  description: Standard atomic weight of xenon; the ion mass used for Xe+ in benchmark B-13
+  value: 131.293
+  units: u
+  class: MEASURED
+  source: "CIAAW standard atomic weights 2021"
+  uncertainty: {type: absolute, value: 0.006}
+  affects: [physics.bohm_speed, physics.ion_energy_flux]
+  category: physics
+
+# ── sheath conventions ───────────────────────────────────────────────────────────
+
+- id: sheath.edge_tolerance
+  description: >-
+    Quasi-neutrality departure delta that defines the sheath edge, (n_i - n_e)/n_i = delta.
+    The sheath edge is a definition, not a physical surface; different definitions shift
+    z_s by a fraction of a Debye length and therefore shift the flux. doc 03 §2.1 names
+    this explicitly as the kind of hidden convention doc 00 C4 exists to forbid.
+  value: 0.01
+  units: dimensionless
+  class: DESIGN
+  source: "doc 03 §2.1 — declared a swept design parameter there"
+  sweep_range: [0.001, 0.1]
+  affects: [physics.sheath_edge_position, physics.ion_energy_flux]
+  category: physics
+
+- id: sheath.h_l
+  description: >-
+    Planar edge-to-centre density ratio n_s/n_0. doc 01 §2.2 evaluates the ion flux with
+    0.61, the standard low-pressure planar value; doc 03 §2.1 gives the Godyak expression
+    0.86/sqrt(3 + L/(2 lambda_i)) that generalises it. The nominal value here is the one
+    the requirement calculations used.
+  value: 0.61
+  units: dimensionless
+  class: PUBLISHED
+  source: "Godyak (1986); Lieberman & Lichtenberg, Principles of Plasma Discharges, §10.2"
+  uncertainty: {type: relative, value: 0.10}
+  sweep_range: [0.3, 0.86]
+  affects: [physics.ion_flux, physics.ion_energy_flux]
+  category: physics
+
+- id: sheath.gamma_i
+  description: >-
+    Adiabatic index for ions in the Bohm speed, c_s = sqrt(e(T_e + gamma_i T_i)/m_i).
+    doc 03 §2.1 gives gamma_i = 3 for one-dimensional adiabatic ions, while doc 01 §2.2
+    evaluates c_s = 2.69 km/s from the cold-ion form. Both appear in the Baseline
+    documents; the discrepancy is 0.8% at RP-1 because T_i << T_e, and it is registered
+    here rather than silently resolved in whichever module happened to need it first.
+  value: 3.0
+  units: dimensionless
+  class: PUBLISHED
+  source: "doc 03 §2.1; Riemann (1991), the Bohm criterion review"
+  sweep_range: [1.0, 3.0]
+  affects: [physics.bohm_speed, physics.ion_flux]
+  category: physics
+
+- id: sheath.gamma_se_W
+  description: >-
+    Ion-induced secondary electron emission yield for Ar+ on tungsten at ~250 eV. doc 03
+    §3.3 is explicit that this is not optional: the secondaries are accelerated back
+    through the full sheath potential and modify both the sheath structure and the OES
+    emission profile inside it. Omitting them is a common and significant modelling error.
+  value: 0.10
+  units: dimensionless
+  class: PUBLISHED
+  source: "Phelps & Petrovic (1999), Plasma Sources Sci. Technol. 8, R21 — compilation"
+  uncertainty: {type: absolute, value: 0.03}
+  sweep_range: [0.0, 0.3]
+  affects: [physics.sheath_structure, oes.sheath_emission]
+  category: physics
+
+- id: sheath.ion_reflection
+  description: >-
+    Ion reflection coefficient at the wall. doc 03 §8 A10 assumes it negligible for Ar+
+    on W at these energies and registers it as a swept parameter with default zero rather
+    than omitting it, so the assumption is visible in the sensitivity study.
+  value: 0.0
+  units: dimensionless
+  class: PUBLISHED
+  source: "Eckstein, Sputtering by Particle Bombardment; TRIM/SDTrimSP tabulations"
+  sweep_range: [0.0, 0.2]
+  affects: [physics.wall_boundary_condition, physics.ion_energy_flux]
+  category: physics
+
+# ── collisions ───────────────────────────────────────────────────────────────────
+
+- id: collisions.sigma_cx_Ar
+  description: >-
+    Ar+/Ar symmetric charge-exchange cross section at the reference ion energy. doc 03
+    §4.5 calls charge exchange the single most important collision for this project: a CX
+    event replaces a fast ion with a slow one that re-accelerates through the remaining
+    potential drop, producing the low-energy IEDF structure that dominates the collisional
+    regime. This constant value is used for the analytic estimates of doc 01 §2.2 only;
+    the kinetic model uses the energy-dependent LXCat set.
+  value: 5.0e-19
+  units: m**2
+  class: PUBLISHED
+  source: "doc 01 §2.2; Phelps ion database, LXCat (energy-dependent set used in L2)"
+  uncertainty: {type: relative, value: 0.15}
+  sweep_range: [2.0e-19, 1.0e-18]
+  affects: [physics.cx_mean_free_path, physics.collisionality, physics.iedf_low_energy_tail]
+  category: atomic

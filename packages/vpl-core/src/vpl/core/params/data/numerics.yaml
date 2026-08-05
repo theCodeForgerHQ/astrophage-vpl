@@ -1,0 +1,109 @@
+# Discretisation choices — doc 03 §3.4, §4.3 and doc 05 §7.1.
+#
+# The two mesh families exist for one reason and it is not numerical: doc 05 §7.1 makes a
+# *deliberate* forward/inverse discretisation mismatch mandatory. Using the same mesh for
+# both is an inverse crime that produces an artificially perfect recovery proving nothing
+# (doc 00 §6). Mesh A generates truth, mesh B performs the inversion, and they are
+# registered separately so that anyone reading a manifest can see the mismatch is
+# intentional rather than a leftover.
+
+- id: mesh.A.cells_per_debye
+  description: >-
+    Cells per Debye length for the truth-generating mesh. doc 05 §7.1 specifies
+    dz = lambda_D/2 for truth generation.
+  value: 2.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 05 §7.1 — the forward half of the mandatory inverse-crime mismatch"
+  sweep_range: [1.0, 8.0]
+  affects: [physics.discretisation_error, verification.V-04]
+  category: numerics
+
+- id: mesh.A.stretch
+  description: >-
+    Geometric cell-growth ratio away from the wall for the truth mesh. doc 03 §3.4 grades
+    toward the wall because lambda_D there is the controlling scale and a uniform mesh
+    spends roughly 90% of its cells on bulk plasma that does not need them.
+  value: 1.02
+  units: dimensionless
+  class: DESIGN
+  source: "doc 03 §3.4 — wall_refined_A"
+  sweep_range: [1.0, 1.10]
+  affects: [physics.discretisation_error]
+  category: numerics
+
+- id: mesh.B.cells_per_debye
+  description: >-
+    Cells per Debye length for the inversion mesh. doc 05 §7.1 specifies dz = lambda_D/3,
+    deliberately different from mesh A.
+  value: 3.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 05 §7.1 — the inverse half of the mandatory mismatch"
+  sweep_range: [1.0, 8.0]
+  affects: [inverse.model_error, verification.V-04]
+  category: numerics
+
+- id: mesh.B.stretch
+  description: Geometric cell-growth ratio for the inversion mesh, distinct from mesh A
+  value: 1.05
+  units: dimensionless
+  class: DESIGN
+  source: "doc 03 §3.4 — wall_refined_B"
+  sweep_range: [1.0, 1.10]
+  affects: [inverse.model_error]
+  category: numerics
+
+- id: mesh.domain_length
+  description: >-
+    Simulation domain length along the sheath normal. doc 03 §4.4 uses 20 mm, roughly
+    22 sheath thicknesses, so the bulk boundary condition is applied far from the sheath
+    structure being resolved. doc 01 R-SPAT-3 requires at least 10 sheath thicknesses.
+  value: 20.0
+  units: mm
+  class: DESIGN
+  source: "doc 03 §4.4"
+  sweep_range: [10.0, 50.0]
+  affects: [physics.boundary_condition_error]
+  category: numerics
+
+- id: pic.n_ppc
+  description: >-
+    Macroparticles per cell per species. doc 03 §4.3 sets 100 as the noise floor and 1000
+    as the default, because the deliverable is the IEDF — a *distribution*, whose tails
+    converge far more slowly than its moments. Converging the mean while the tail is still
+    noise is a classic and silent PIC failure, so V-06 tests convergence of the IEDF shape
+    by KS distance rather than of the density profile.
+  value: 1000.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 03 §4.3"
+  sweep_range: [100.0, 10000.0]
+  affects: [physics.statistical_noise, verification.V-06]
+  category: numerics
+
+- id: pic.timestep_safety
+  description: >-
+    Fraction of the inverse electron plasma frequency used as the PIC timestep. doc 03
+    §4.3 requires dt <= 0.2/omega_pe to resolve the electron plasma oscillation, and
+    treats a violation as a runtime error rather than a warning.
+  value: 0.2
+  units: dimensionless
+  class: DESIGN
+  source: "doc 03 §4.3 — standard explicit-PIC stability constraint"
+  sweep_range: [0.05, 0.2]
+  affects: [physics.numerical_heating, verification.V-05, verification.V-07]
+  category: numerics
+
+- id: timing.phase_bins
+  description: >-
+    Number of RF phase bins for cyclo-stationary accumulation. doc 02 §10.3 divides the
+    73.7 ns period into 16 bins of 4.6 ns, compatible with the 2 ns minimum ICCD gate.
+    doc 01 R-TEMP-1 requires at least 15.
+  value: 16.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 02 §10.3"
+  sweep_range: [8.0, 64.0]
+  affects: [timing.phase_resolution, thomson.accumulation_time]
+  category: numerics

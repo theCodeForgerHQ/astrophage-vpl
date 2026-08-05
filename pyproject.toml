@@ -47,6 +47,8 @@ dev = [
     "hypothesis>=6.122",
     "mypy>=1.14",
     "ruff>=0.9",
+    # PyYAML ships no inline types; the stubs keep vpl.core.params under --strict.
+    "types-PyYAML>=6.0",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
