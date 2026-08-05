@@ -111,7 +111,9 @@ explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 # Third-party scientific stack ships incomplete or absent stubs.
-module = ["scipy.*", "h5py.*", "zarr.*", "pint.*", "matplotlib.*"]
+# pint is deliberately NOT on this list: it ships py.typed, and vpl.core.units is
+# checked against its real signatures.
+module = ["scipy.*", "h5py.*", "zarr.*", "matplotlib.*"]
 ignore_missing_imports = true
 
 # ─────────────────────────────────────────────────────────────────────────────
