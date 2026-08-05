@@ -45,7 +45,13 @@ jobs:
       - run: uv sync --all-packages --all-groups
       # doc 08 §12: --strict is required on vpl-core specifically. The core is the
       # contract layer; an untyped contract is not a contract.
-      - run: uv run mypy packages/vpl-core/src
+      #
+      # The tests are checked too, and not as a nicety. Half of what proves the doc 08 §4
+      # Protocols actually constrain anything is a `# type: ignore[arg-type]` on a
+      # near-miss implementation: --strict includes warn_unused_ignores, so an ignore
+      # that stopped being necessary would fail the type check. That marker *is* the
+      # assertion, and it is only gated if mypy runs over the tests.
+      - run: uv run mypy packages/vpl-core/src packages/vpl-core/tests
 
   registry:
     name: Parameter registry discipline
