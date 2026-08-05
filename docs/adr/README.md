@@ -16,6 +16,8 @@ constraint (doc 00 §4), requires an ADR.
 | [ADR-006](ADR-006-toolchain.md) | Workspace, environment and formatter toolchain | **Accepted** | P1 (everything) |
 | [ADR-007](ADR-007-child-langmuir-thickness.md) | Which density sets lambda_D in the Child-Langmuir thickness | **Accepted** | P1 (V-03), and every quantity derived from s |
 | [ADR-008](ADR-008-manifest-substrate.md) | Manifest substrate: OmegaConf now, Hydra at the sweep layer | **Accepted** | P1 (G-1.3) |
+| [ADR-009](ADR-009-eedf-solver.md) | EEDF / Boltzmann solver: neither BOLSIG+ nor `bolos` | **Accepted** | P1 (WBS 1.8), and everything downstream of a rate coefficient |
+| [ADR-010](ADR-010-v03-sheath-thickness-gate.md) | V-03's sheath-thickness criterion is unreachable as written | **Accepted** | P1 (G-1.2), and L2's V-03 in P2 |
 
 ## Status values
 

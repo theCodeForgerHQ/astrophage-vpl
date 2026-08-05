@@ -21,6 +21,31 @@ dependencies = [
     "scipy>=1.14",
 ]
 
+[project.optional-dependencies]
+#  L1 — doc 03 §3. doc 03 §9 makes the FEM solver a **buy** decision ("FEniCSx: mature,
+#  verified, adjoint-capable") and doc 08 §3 requires it to sit behind an extra, by name:
+#
+#      `pip install vpl-core vpl-inverse` must work without dragging in FEniCSx and
+#      Gmsh — a user who only wants to run the inversion on their own data should not
+#      need a PDE stack.
+#
+#  **DOLFINx itself is deliberately not listed, and that is a limitation rather than an
+#  oversight.** Its PyPI distribution is a source build that expects PETSc, Boost,
+#  pugixml, HDF5 and a C++17 toolchain to be present already; adding `fenics-dolfinx` to
+#  this list makes `uv lock` attempt that build on every developer's machine, including
+#  the ones that never import `vpl.physics.fluid` — measured, not assumed: it does not
+#  terminate in two minutes on the reference machine. The supported route, and the one
+#  the development environment for this package uses, is conda-forge:
+#
+#      mamba create -n vpl-fenicsx fenics-dolfinx=0.9 petsc4py mpi4py python=3.12
+#
+#  `vpl.physics.fluid` therefore fails at import with a plain ModuleNotFoundError where
+#  the stack is absent, which is what the `pytest.importorskip("dolfinx")` in every
+#  `test_fluid_*.py` module keys off, and what the `fenicsx` pytest marker records.
+fluid = [
+    "mpi4py>=4.0",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
