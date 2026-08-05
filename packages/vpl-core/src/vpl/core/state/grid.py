@@ -19,7 +19,7 @@ from typing import cast
 import numpy as np
 from numpy.typing import NDArray
 
-from vpl.core.units import Q_, Quantity, magnitude_in
+from vpl.core.units import Q_, ArrayQuantity, Quantity, ScalarQuantity, magnitude_in
 
 __all__ = ["PhaseGrid", "SpatialGrid", "TimeGrid"]
 
@@ -112,7 +112,7 @@ class SpatialGrid:
     # ── views ───────────────────────────────────────────────────────────────────
 
     @property
-    def z(self) -> Quantity:
+    def z(self) -> ArrayQuantity:
         """Coordinates as a dimensional quantity, for module boundaries."""
         return Q_(self.z_m, "m")
 
@@ -122,7 +122,7 @@ class SpatialGrid:
         return np.diff(self.z_m)
 
     @property
-    def min_dz(self) -> Quantity:
+    def min_dz(self) -> ScalarQuantity:
         """The smallest cell.
 
         The stability constraints of doc 03 §4.3 bind on the smallest cell, not the mean.
@@ -131,7 +131,7 @@ class SpatialGrid:
         return Q_(float(self.dz_m.min()), "m")
 
     @property
-    def length(self) -> Quantity:
+    def length(self) -> ScalarQuantity:
         """Distance from the wall to the far boundary."""
         return Q_(float(self.z_m[-1] - self.z_m[0]), "m")
 
@@ -182,7 +182,7 @@ class TimeGrid:
         return cls(t_s=np.linspace(0.0, float(span), n_points))
 
     @property
-    def t(self) -> Quantity:
+    def t(self) -> ArrayQuantity:
         return Q_(self.t_s, "s")
 
     @property
@@ -190,7 +190,7 @@ class TimeGrid:
         return np.diff(self.t_s)
 
     @property
-    def duration(self) -> Quantity:
+    def duration(self) -> ScalarQuantity:
         return Q_(float(self.t_s[-1] - self.t_s[0]), "s")
 
     @property
@@ -229,14 +229,14 @@ class PhaseGrid:
             raise ValueError(f"period must be positive, got {self.period}")
 
     @property
-    def bin_width(self) -> Quantity:
+    def bin_width(self) -> ScalarQuantity:
         """Duration of one phase bin.
 
         doc 02 §10.3 requires this to stay compatible with the 2 ns minimum ICCD gate;
         the check belongs to the instrument, which knows its own gate.
         """
         # pint's division is typed as returning Any; the operands make the result a time.
-        return cast("Quantity", self.period / self.n_bins)
+        return cast("ScalarQuantity", self.period / self.n_bins)
 
     @property
     def bin_width_rad(self) -> float:

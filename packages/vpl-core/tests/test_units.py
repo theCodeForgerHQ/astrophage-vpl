@@ -76,7 +76,7 @@ class TestMagnitudeIn:
         # assumption doc 00 C4 forbids: it would let an unlabelled number through the
         # boundary check that exists to catch it.
         with pytest.raises(DimensionalityError, match="not a dimensional quantity"):
-            magnitude_in(2.5, "m")  # type: ignore[arg-type]
+            magnitude_in(2.5, "m")  # type: ignore[call-overload]
 
     def test_accepts_dimensionless_quantities(self) -> None:
         assert magnitude_in(Q_(0.61, "dimensionless"), "dimensionless") == pytest.approx(0.61)

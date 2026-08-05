@@ -29,6 +29,7 @@ from vpl.core import provenance
 from vpl.core.provenance import (
     UNKNOWN_COMMIT,
     EnvironmentLockSource,
+    ManifestValue,
     Provenance,
     Tier,
     environment_lock_hash,
@@ -147,7 +148,7 @@ class TestManifestSha256:
         # Pins the canonical form itself, not merely self-consistency: sorted keys, no
         # whitespace, UTF-8. Without this, a later change of separators would silently
         # renumber every archived run.
-        payload = {"b": 1, "a": {"d": [1, 2], "c": True}}
+        payload: ManifestValue = {"b": 1, "a": {"d": [1, 2], "c": True}}
         canonical = b'{"a":{"c":true,"d":[1,2]},"b":1}'
 
         assert manifest_sha256(payload) == hashlib.sha256(canonical).hexdigest()
@@ -167,7 +168,9 @@ class TestManifestSha256:
 
     def test_a_value_json_cannot_represent_is_rejected_by_name(self) -> None:
         with pytest.raises(TypeError, match="datetime"):
-            manifest_sha256({"created": datetime(2026, 8, 4, tzinfo=UTC)})
+            # Deliberately invalid: the point is that the *runtime* check rejects it
+            # by name, which a caller reaching it through untyped YAML would need.
+            manifest_sha256({"created": datetime(2026, 8, 4, tzinfo=UTC)})  # type: ignore[dict-item]
 
 
 class TestGitState:

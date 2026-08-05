@@ -12,6 +12,8 @@ posterior.
 
 from __future__ import annotations
 
+from typing import Any, cast, overload
+
 import numpy as np
 import pint
 from numpy.typing import NDArray
@@ -19,9 +21,11 @@ from numpy.typing import NDArray
 __all__ = [
     "Q_",
     "UREG",
+    "ArrayQuantity",
     "DimensionalityError",
     "Magnitude",
     "Quantity",
+    "ScalarQuantity",
     "magnitude_in",
 ]
 
@@ -48,8 +52,28 @@ UREG.define("millitorr = 1e-3 * torr = mTorr = mtorr = milliTorr")
 
 pint.set_application_registry(UREG)  # type: ignore[no-untyped-call]
 
-#: A dimensional quantity drawn from :data:`UREG`.
-type Quantity = pint.Quantity[Magnitude]
+#: A dimensional quantity drawn from :data:`UREG`, of unspecified magnitude type.
+#:
+#: Deliberately ``pint.Quantity[Any]`` rather than ``pint.Quantity[float | NDArray]``.
+#: pint's ``Quantity`` is *invariant* in its magnitude, so the union form makes
+#: ``Quantity[float]`` unassignable to it — and every parameter position in the project
+#: would then reject the scalar quantities that are the common case. The rule that falls
+#: out is the usual one: **accept broadly, return precisely.** Parameters take
+#: :data:`Quantity`; returns are :data:`ScalarQuantity` or :data:`ArrayQuantity` wherever
+#: which one it is is a fact about the quantity rather than about one caller.
+type Quantity = pint.Quantity[Any]
+
+#: A quantity whose magnitude is known to be a scalar.
+#:
+#: Use this in a signature wherever the scalar-ness is a fact about the quantity rather
+#: than about one caller — a sheath thickness is always one number. It lets
+#: :func:`magnitude_in` return a plain ``float`` instead of a union the caller then has
+#: to narrow, and hand-narrowing at every call site is how a union type stops being
+#: checked at all.
+type ScalarQuantity = pint.Quantity[float]
+
+#: A quantity whose magnitude is known to be an array — a field, a grid, an axis.
+type ArrayQuantity = pint.Quantity[NDArray[np.float64]]
 
 #: Quantity constructor bound to :data:`UREG`. ``Q_(5.0, "mTorr")``.
 Q_ = UREG.Quantity
@@ -64,11 +88,29 @@ class DimensionalityError(TypeError):
     """
 
 
+@overload
+def magnitude_in(value: ScalarQuantity, units: str) -> float: ...
+
+
+@overload
+def magnitude_in(value: ArrayQuantity, units: str) -> NDArray[np.float64]: ...
+
+
+@overload
+def magnitude_in(value: Quantity, units: str) -> Magnitude: ...
+
+
 def magnitude_in(value: Quantity, units: str) -> Magnitude:
     """Convert ``value`` to ``units`` and strip them, raising if it cannot be done.
 
     This is the entry half of the doc 08 section 5 contract: hot loops receive bare
     arrays, but only after the caller has proved they mean what the loop assumes.
+
+    The overloads carry the magnitude's own type through, so a caller who passed a
+    scalar gets a ``float`` back and one who passed an array gets an array. Without
+    them every call site would face ``float | NDArray`` and would either index into a
+    possible float or narrow it by hand — and hand-narrowing at a hundred call sites is
+    how a union type stops being checked at all.
 
     Args:
         value: A dimensional quantity from :data:`UREG`.
@@ -90,8 +132,10 @@ def magnitude_in(value: Quantity, units: str) -> Magnitude:
 
     try:
         # ``m_as`` converts and strips in one step, so no converted-but-unasserted
-        # quantity ever exists.
-        return value.m_as(units)
+        # quantity ever exists. The cast is needed because `Quantity` is
+        # `pint.Quantity[Any]` in parameter position (see its docstring), so pint can
+        # only promise `Any` back; the overloads above are what give callers a real type.
+        return cast("Magnitude", value.m_as(units))
     except pint.DimensionalityError as exc:
         raise DimensionalityError(
             f"cannot supply this value where {units!r} was required: {exc}"

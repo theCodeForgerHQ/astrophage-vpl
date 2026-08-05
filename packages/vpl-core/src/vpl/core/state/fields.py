@@ -23,7 +23,7 @@ from numpy.typing import NDArray
 
 from vpl.core.state.grid import SpatialGrid, TimeGrid
 from vpl.core.state.species import Species
-from vpl.core.units import Q_, UREG, DimensionalityError, Quantity
+from vpl.core.units import Q_, UREG, ArrayQuantity, DimensionalityError
 
 __all__ = ["ScalarField", "VelocityDistribution"]
 
@@ -85,7 +85,7 @@ class ScalarField:
             )
 
     @property
-    def quantity(self) -> Quantity:
+    def quantity(self) -> ArrayQuantity:
         """Values as a dimensional quantity, for module boundaries (doc 08 §5)."""
         return Q_(self.values, self.units)
 
@@ -174,7 +174,7 @@ class VelocityDistribution:
         object.__setattr__(self, "values", values)
 
     @property
-    def v(self) -> Quantity:
+    def v(self) -> ArrayQuantity:
         """Velocity axis as a dimensional quantity."""
         return Q_(self.v_m_per_s, "m/s")
 
