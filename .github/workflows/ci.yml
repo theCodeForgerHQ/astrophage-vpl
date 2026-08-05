@@ -85,3 +85,34 @@ jobs:
         run: uv run pytest -m "physics and not slow" -v
       - name: Coverage gate (vpl-core >= 80%, doc 00 E5)
         run: uv run coverage report --include="packages/vpl-core/*" --fail-under=80
+
+  fluid:
+    name: L1 verification gates (FEniCSx)
+    runs-on: ubuntu-latest
+    # doc 08 §3 keeps FEniCSx out of the workspace environment on purpose, so the L1
+    # tests skip in the job above. Without this job the V-01, V-02, V-03 and V-04 gates
+    # are written down and never run — which is worse than not having them, because the
+    # green tick would say otherwise.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: vpl-fenicsx
+          create-args: >-
+            python=3.12
+            fenics-dolfinx=0.9
+            petsc4py
+            mpich
+            numpy
+            scipy
+            pytest
+            pint
+            sympy
+          condarc: |
+            channels:
+              - conda-forge
+      - name: Physics verification gates V-01, V-02, V-03, V-04
+        shell: bash -el {0}
+        run: |
+          PYTHONPATH=packages/vpl-core/src:packages/vpl-physics/src:packages/vpl-validation/src \
+            pytest packages/vpl-physics/tests/test_fluid_*.py -v

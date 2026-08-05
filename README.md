@@ -126,17 +126,19 @@ above are normative and the code is written against them section by section.
 |---|---|---|
 | 1.1 | `vpl-core` — protocols, state model, units, provenance | **Done** |
 | 1.2 | Parameter registry + literal-lint rule | **Done** |
-| 1.3 | Manifest engine, `vpl run` / `reproduce` / `compare` | Next |
+| 1.3 | Manifest engine, `vpl run` / `reproduce` / `compare` | **Done** — G-1.3 passes |
 | 1.4 | Storage layer with embedded provenance | **Done** |
-| 1.5 | L0 analytic sheath models | **Done** — V-03 passes |
-| 1.6 | L1 fluid solver (FEniCSx), V-01 / V-02 | Pending |
-| 1.7 | Atomic-data loaders (LXCat, NIST ASD, OpenADAS) | Pending |
-| 1.8 | Boltzmann / EEDF integration | Pending |
-| 1.9 | CI gates, G-1 gate report | Partial |
+| 1.5 | L0 analytic sheath models | **Done** — V-03 anchor |
+| 1.6 | L1 fluid solver (FEniCSx), V-01 / V-02 | **Done** — V-01, V-02, V-04 pass |
+| 1.7 | Atomic-data loaders (LXCat, NIST ASD, OpenADAS) | **Done** |
+| 1.8 | Boltzmann / EEDF integration | **Done** |
+| 1.9 | CI gates, G-1 gate report | **Done** |
+
+**[Gate G-1 is met](docs/gates/G-1-foundation.md)**, with G-1.2 amended by ADR-010.
 
 Verified on both the development machine (macOS/arm64) and the doc 10 §1 reference
-machine (RTX A4000, WSL2 Ubuntu 24.04): 829 tests, `mypy --strict` clean, 98 % coverage,
-`ASSUMED` count 0.
+machine (RTX A4000, WSL2 Ubuntu 24.04): 1 488 tests in the workspace environment plus 92
+under FEniCSx, `mypy --strict` clean, 98 % core coverage, `ASSUMED` count 0.
 
 ### Corrections to the Baseline documents
 
@@ -150,6 +152,15 @@ silently applied. This is the process working as doc 11 G-1.4 anticipates, not a
   unaffected** and doc 01 §2.3's transit-time argument survives.
 - **ADR-007 §related** — doc 03 §2.1 states `γ_i = 3` in the Bohm speed while doc 03 §2.3's
   own arithmetic uses the cold-ion form, as does doc 01 §2.2.
+- **[ADR-008](docs/adr/ADR-008-manifest-substrate.md)** — PyYAML cannot parse doc 08 §6's
+  own example manifest: YAML 1.1's float resolver requires a signed exponent, so `1.0e17`
+  loads as a string.
+- **[ADR-009](docs/adr/ADR-009-eedf-solver.md)** — neither Boltzmann solver named in
+  doc 08 §2 is usable; `bolos` calls a SciPy API removed in 1.14, at exactly the three
+  integrals doc 03 §3.2 needs.
+- **[ADR-010](docs/adr/ADR-010-v03-sheath-thickness-gate.md)** — V-03's sheath-thickness
+  criterion is unreachable anywhere in the doc 01 R-ENV-4 envelope, and doc 03 §2.1
+  understates how strongly `s` depends on the sheath-edge definition.
 - **The bias sign** — doc 08 §6's manifest writes `bias: -250.0 V`; doc 03 §2.2 uses `V_w`
   as a positive magnitude. Settled in `vpl.core.state.params`.
 
