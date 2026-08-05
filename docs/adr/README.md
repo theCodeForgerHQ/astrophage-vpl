@@ -13,6 +13,8 @@ constraint (doc 00 §4), requires an ADR.
 | [ADR-003](ADR-003-pic-engine.md) | PIC engine: build vs adopt | **Open (leaning build)** | P2 kinetic solver |
 | [ADR-004](ADR-004-interferometry-channel.md) | Retain or drop the interferometry channel | **Open — decided by data** | P4 information analysis |
 | [ADR-005](ADR-005-posterior-storage.md) | Posterior representation on disk | **Open** | P3 storage layer |
+| [ADR-006](ADR-006-toolchain.md) | Workspace, environment and formatter toolchain | **Accepted** | P1 (everything) |
+| [ADR-007](ADR-007-child-langmuir-thickness.md) | Which density sets lambda_D in the Child-Langmuir thickness | **Accepted** | P1 (V-03), and every quantity derived from s |
 
 ## Status values
 
