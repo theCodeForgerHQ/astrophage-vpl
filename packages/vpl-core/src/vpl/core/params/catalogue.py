@@ -43,6 +43,28 @@ _OPTIONAL_KEYS = frozenset({"source", "uncertainty", "sweep_range", "affects"})
 _KNOWN_KEYS = _REQUIRED_KEYS | _OPTIONAL_KEYS
 
 
+def _read_registry_file(path: Path) -> str:
+    """Read a registry file as UTF-8, naming it if that fails.
+
+    The explicit encoding is not decoration. Python's text mode defaults to the *locale*
+    encoding, so on a machine with ``LANG=C`` every em dash and section sign in these
+    files becomes a crash — and doc 00 E3 promises reproducibility, which a load that
+    depends on an environment variable does not deliver.
+
+    The wrapping matters as much. A bare ``UnicodeDecodeError`` out of ``pathlib`` names
+    neither the file nor the registry, and the registry is the one thing doc 08 §5 calls
+    the single source of truth: when it will not load, the message has to start there.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"{path}: the parameter registry must be UTF-8 text, and this file is not "
+            f"({exc}). If it is a stray binary sidecar rather than a registry file, "
+            f"remove it — the loader skips dot-prefixed names but not this one."
+        ) from exc
+
+
 def _parse_uncertainty(raw: object, *, entry_id: str) -> Uncertainty | None:
     if raw is None:
         return None
@@ -122,7 +144,14 @@ class ParameterRegistry:
         """
         entries: dict[str, Parameter] = {}
         for path in paths:
-            document = yaml.safe_load(path.read_text())
+            if path.name.startswith("."):
+                # A registry file is something a person wrote and committed. Names
+                # beginning with a dot are macOS AppleDouble sidecars, editor swap files
+                # and partial downloads — all of which a `*.yaml` glob happily matches.
+                # Found on the reference machine (doc 10 §1), where a stray `._physics.yaml`
+                # turned the single source of truth into a UnicodeDecodeError at import.
+                continue
+            document = yaml.safe_load(_read_registry_file(path))
             if document is None:
                 continue
             if not isinstance(document, list):

@@ -205,6 +205,10 @@ def check_source(source: str, *, path: Path) -> list[LiteralFinding]:
 
 def _python_sources(root: Path) -> Iterator[Path]:
     for path in sorted(root.rglob("*.py")):
+        if path.name.startswith("."):
+            # AppleDouble sidecars and editor swap files are not source. See the note in
+            # vpl.core.params.catalogue: this was found on the reference machine, not here.
+            continue
         if _EXEMPT_DIRECTORIES.isdisjoint(path.relative_to(root).parts):
             yield path
 
@@ -219,7 +223,7 @@ def check_tree(root: Path) -> list[LiteralFinding]:
     findings: list[LiteralFinding] = []
     for path in _python_sources(root):
         relative = path.relative_to(root)
-        findings.extend(check_source(path.read_text(), path=relative))
+        findings.extend(check_source(path.read_text(encoding="utf-8"), path=relative))
     return findings
 
 
@@ -250,7 +254,7 @@ def _report_assumed_count(baseline_path: Path) -> int:
 
     baseline = 0
     if baseline_path.is_file():
-        baseline = int(json.loads(baseline_path.read_text())["assumed_count"])
+        baseline = int(json.loads(baseline_path.read_text(encoding="utf-8"))["assumed_count"])
 
     if current > baseline:
         print(
