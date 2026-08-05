@@ -119,9 +119,39 @@ These are not preferences. Every document is written to respect them.
 
 ## Status
 
-**Phase 0 — Planning.** The documents above are the deliverable. No production code has
-been written yet, by design: the architecture is settled on paper first so that
-implementation becomes the act of filling in defined interfaces.
+**Phase 1 — Foundation, in progress.** Phase 0 remains the specification; the documents
+above are normative and the code is written against them section by section.
+
+| WBS | Item | State |
+|---|---|---|
+| 1.1 | `vpl-core` — protocols, state model, units, provenance | **Done** |
+| 1.2 | Parameter registry + literal-lint rule | **Done** |
+| 1.3 | Manifest engine, `vpl run` / `reproduce` / `compare` | Next |
+| 1.4 | Storage layer with embedded provenance | **Done** |
+| 1.5 | L0 analytic sheath models | **Done** — V-03 passes |
+| 1.6 | L1 fluid solver (FEniCSx), V-01 / V-02 | Pending |
+| 1.7 | Atomic-data loaders (LXCat, NIST ASD, OpenADAS) | Pending |
+| 1.8 | Boltzmann / EEDF integration | Pending |
+| 1.9 | CI gates, G-1 gate report | Partial |
+
+Verified on both the development machine (macOS/arm64) and the doc 10 §1 reference
+machine (RTX A4000, WSL2 Ubuntu 24.04): 829 tests, `mypy --strict` clean, 98 % coverage,
+`ASSUMED` count 0.
+
+### Corrections to the Baseline documents
+
+Implementation has produced three corrections, each recorded as an ADR rather than
+silently applied. This is the process working as doc 11 G-1.4 anticipates, not a defect.
+
+- **[ADR-007](docs/adr/ADR-007-child-langmuir-thickness.md)** — doc 01 §2.2 evaluates the
+  Child–Langmuir sheath thickness with `λ_D` at the bulk density, but doc 03 §2.3 derives
+  the expression by matching to the Bohm flux, which fixes `λ_D` at the sheath edge. The
+  self-consistent value is 1.14 mm, not 0.89 mm. `Γ_E` contains no `s`, so **V-03 is
+  unaffected** and doc 01 §2.3's transit-time argument survives.
+- **ADR-007 §related** — doc 03 §2.1 states `γ_i = 3` in the Bohm speed while doc 03 §2.3's
+  own arithmetic uses the cold-ion form, as does doc 01 §2.2.
+- **The bias sign** — doc 08 §6's manifest writes `bias: -250.0 V`; doc 03 §2.2 uses `V_w`
+  as a positive magnitude. Settled in `vpl.core.state.params`.
 
 ## Licence
 
