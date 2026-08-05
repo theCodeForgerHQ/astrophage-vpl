@@ -17,6 +17,12 @@ dependencies = [
     "vpl-core",
     "numpy>=2.1",
     "scipy>=1.14",
+    # doc 07 §2.3's manufactured solutions need the source term derived *through* the
+    # operator. A hand-derived source that is subtly wrong makes a correct solver
+    # converge at the wrong order, and the bug hunt then goes looking in the solver.
+    # Symbolic differentiation removes that failure mode entirely; doc 08 §2's rule is
+    # to buy mature libraries rather than rebuild them, and this is one.
+    "sympy>=1.13",
 ]
 
 [build-system]
