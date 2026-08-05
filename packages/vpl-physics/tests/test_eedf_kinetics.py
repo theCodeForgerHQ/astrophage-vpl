@@ -239,6 +239,7 @@ class TestConstruction:
                 process=ProcessType.EXCITATION,
                 threshold_ev=-1.0,
                 sigma_m2=np.zeros(4),
+                sigma_edge_m2=np.zeros(5),
             )
 
     def test_a_channel_cross_section_cannot_be_negative(self) -> None:
@@ -248,6 +249,7 @@ class TestConstruction:
                 process=ProcessType.EXCITATION,
                 threshold_ev=11.5,
                 sigma_m2=np.array([-1e-21, 0.0]),
+                sigma_edge_m2=np.zeros(3),
             )
 
     def test_the_mass_ratio_must_be_positive_and_small(self) -> None:
@@ -313,6 +315,7 @@ class TestMoreRejections:
                 process=ProcessType.EXCITATION,
                 threshold_ev=11.5,
                 sigma_m2=np.zeros((2, 2)),
+                sigma_edge_m2=np.zeros(3),
             )
 
     def test_a_non_finite_channel_cross_section_is_refused(self) -> None:
@@ -322,6 +325,7 @@ class TestMoreRejections:
                 process=ProcessType.EXCITATION,
                 threshold_ev=11.5,
                 sigma_m2=np.array([np.nan, 0.0]),
+                sigma_edge_m2=np.zeros(3),
             )
 
     def test_a_channel_that_does_not_match_the_grid_is_refused(self) -> None:
@@ -339,6 +343,7 @@ class TestMoreRejections:
                         process=ProcessType.EXCITATION,
                         threshold_ev=11.5,
                         sigma_m2=np.zeros(7),
+                        sigma_edge_m2=np.zeros(8),
                     ),
                 ),
             )
@@ -349,7 +354,157 @@ class TestMoreRejections:
             process=ProcessType.EXCITATION,
             threshold_ev=11.5,
             sigma_m2=np.zeros(4),
+            sigma_edge_m2=np.zeros(5),
         )
 
         assert "E + Ar -> E + Ar*" in repr(channel)
         assert "11.5 eV" in repr(channel)
+
+
+class TestTheEffectiveMomentumTransferCrossSection:
+    """Reid (1979) eqs. (3) and (4) — inelastic collisions transfer momentum too.
+
+    Reid derives the momentum-conservation equation with both collision types and shows
+    it keeps the elastic form only if ``sigma_m,e`` is replaced by an *equivalent* cross
+    section. For isotropic inelastic scattering that reduces to his eq. (4)::
+
+        sigma_m(eps) = sigma_m,e(eps) + sum_k sigma_k(eps)
+
+    and he is unusually emphatic about the consequence:
+
+        if equation (5b) is used to determine f(eps), the momentum transfer cross
+        section that appears in the equation is the total cross section for momentum
+        transfer and not the cross section for momentum transfer in elastic collisions.
+
+    Omitting the sum makes the electrons too mobile and, through the field-heating term,
+    too hot. It is invisible whenever the inelastic cross sections are small next to the
+    elastic one — which is every synthetic gas in this suite before this class, and why
+    the defect survived until a published benchmark with a *large* inelastic cross
+    section was run against it.
+    """
+
+    def test_it_adds_the_inelastic_cross_sections_to_the_elastic_one(self) -> None:
+        grid = _grid()
+        elastic = 6e-20
+        first, second = 1e-20, 3e-20
+        kinetics = ElectronKinetics(
+            grid=grid,
+            database="synthetic",
+            momentum_transfer_m2=np.full(grid.n_cells, elastic),
+            momentum_transfer_edge_m2=np.full(grid.n_cells + 1, elastic),
+            mass_ratio=ARGON_MASS_RATIO,
+            channels=(
+                InelasticChannel(
+                    reaction="E + Ar -> E + Ar*",
+                    process=ProcessType.EXCITATION,
+                    threshold_ev=11.5,
+                    sigma_m2=np.full(grid.n_cells, first),
+                    sigma_edge_m2=np.full(grid.n_cells + 1, first),
+                ),
+                InelasticChannel(
+                    reaction="E + Ar -> E + E + Ar+",
+                    process=ProcessType.IONIZATION,
+                    threshold_ev=15.76,
+                    sigma_m2=np.full(grid.n_cells, second),
+                    sigma_edge_m2=np.full(grid.n_cells + 1, second),
+                ),
+            ),
+        )
+
+        np.testing.assert_allclose(
+            kinetics.effective_momentum_transfer_m2, elastic + first + second
+        )
+
+    def test_it_does_the_same_at_the_cell_boundaries(self) -> None:
+        # The flux terms and the mobility sum are evaluated at boundaries, so an
+        # effective cross section that existed only at cell centres would fix the
+        # energy balance and leave the transport coefficients wrong.
+        grid = _grid()
+        kinetics = ElectronKinetics(
+            grid=grid,
+            database="synthetic",
+            momentum_transfer_m2=np.full(grid.n_cells, 6e-20),
+            momentum_transfer_edge_m2=np.full(grid.n_cells + 1, 6e-20),
+            mass_ratio=ARGON_MASS_RATIO,
+            channels=(
+                InelasticChannel(
+                    reaction="E + Ar -> E + Ar*",
+                    process=ProcessType.EXCITATION,
+                    threshold_ev=11.5,
+                    sigma_m2=np.full(grid.n_cells, 2e-20),
+                    sigma_edge_m2=np.full(grid.n_cells + 1, 2e-20),
+                ),
+            ),
+        )
+
+        assert kinetics.effective_momentum_transfer_edge_m2.shape == (grid.n_cells + 1,)
+        np.testing.assert_allclose(kinetics.effective_momentum_transfer_edge_m2, 8e-20)
+
+    def test_a_gas_with_no_inelastic_channels_is_left_alone(self) -> None:
+        grid = _grid()
+        kinetics = ElectronKinetics(
+            grid=grid,
+            database="synthetic",
+            momentum_transfer_m2=np.full(grid.n_cells, 6e-20),
+            momentum_transfer_edge_m2=np.full(grid.n_cells + 1, 6e-20),
+            mass_ratio=ARGON_MASS_RATIO,
+            channels=(),
+        )
+
+        np.testing.assert_array_equal(
+            kinetics.effective_momentum_transfer_m2, kinetics.momentum_transfer_m2
+        )
+
+    def test_the_elastic_cross_section_is_still_available_separately(self) -> None:
+        # Reid's eq. (5a) keeps sigma_m,e in the elastic energy-loss term and uses the
+        # total only in the field-heating and transport terms. Collapsing the two would
+        # make the exact form unreachable.
+        grid = _grid()
+        kinetics = ElectronKinetics(
+            grid=grid,
+            database="synthetic",
+            momentum_transfer_m2=np.full(grid.n_cells, 6e-20),
+            momentum_transfer_edge_m2=np.full(grid.n_cells + 1, 6e-20),
+            mass_ratio=ARGON_MASS_RATIO,
+            channels=(
+                InelasticChannel(
+                    reaction="E + Ar -> E + Ar*",
+                    process=ProcessType.EXCITATION,
+                    threshold_ev=11.5,
+                    sigma_m2=np.full(grid.n_cells, 2e-20),
+                    sigma_edge_m2=np.full(grid.n_cells + 1, 2e-20),
+                ),
+            ),
+        )
+
+        np.testing.assert_allclose(kinetics.momentum_transfer_m2, 6e-20)
+
+    def test_a_channel_edge_cross_section_must_match_the_boundary_count(self) -> None:
+        grid = _grid()
+        with pytest.raises(ValueError, match="boundar"):
+            ElectronKinetics(
+                grid=grid,
+                database="synthetic",
+                momentum_transfer_m2=np.full(grid.n_cells, 6e-20),
+                momentum_transfer_edge_m2=np.full(grid.n_cells + 1, 6e-20),
+                mass_ratio=ARGON_MASS_RATIO,
+                channels=(
+                    InelasticChannel(
+                        reaction="E + Ar -> E + Ar*",
+                        process=ProcessType.EXCITATION,
+                        threshold_ev=11.5,
+                        sigma_m2=np.full(grid.n_cells, 2e-20),
+                        sigma_edge_m2=np.full(grid.n_cells, 2e-20),
+                    ),
+                ),
+            )
+
+    def test_kinetics_from_set_samples_channels_at_the_boundaries_too(self) -> None:
+        # The loader has to supply both, or every real gas silently falls back to an
+        # elastic-only momentum transfer and the defect returns through the front door.
+        grid = _grid()
+        kinetics = kinetics_from_set(_set(_effective(), _ionisation()), grid)
+
+        for channel in kinetics.channels:
+            assert channel.sigma_edge_m2.shape == (grid.n_cells + 1,)
+        assert np.any(kinetics.effective_momentum_transfer_edge_m2 > 0.0)

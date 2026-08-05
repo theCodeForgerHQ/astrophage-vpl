@@ -109,12 +109,19 @@ class InelasticChannel:
         threshold_ev: The energy an electron loses in one such collision.
         sigma_m2: The cross section at the grid's cell centres. Exactly zero below the
             threshold, which is physics rather than policy.
+        sigma_edge_m2: The same cross section at the cell boundaries. It exists for the
+            same reason the elastic pair does — see the module docstring — and because
+            an inelastic collision transfers momentum as well as energy, so this channel
+            contributes to :attr:`ElectronKinetics.effective_momentum_transfer_edge_m2`
+            and thence to the flux terms and the mobility sum, both of which are
+            evaluated at boundaries.
     """
 
     reaction: str
     process: ProcessType
     threshold_ev: float
     sigma_m2: FloatArray
+    sigma_edge_m2: FloatArray
 
     def __post_init__(self) -> None:
         if not self.threshold_ev > 0.0:
@@ -122,15 +129,18 @@ class InelasticChannel:
                 f"an inelastic channel needs a positive threshold energy, got "
                 f"{self.threshold_ev} for {self.reaction!r}"
             )
-        sigma = np.array(self.sigma_m2, dtype=np.float64, copy=True)
-        if sigma.ndim != 1:
-            raise ValueError(f"a channel cross section must be one-dimensional, got {sigma.shape}")
-        if not np.all(np.isfinite(sigma)):
-            raise ValueError(f"the {self.reaction!r} cross section must be finite")
-        if np.any(sigma < 0.0):
-            raise ValueError(f"the {self.reaction!r} cross section has a negative value")
-        sigma.flags.writeable = False
-        object.__setattr__(self, "sigma_m2", sigma)
+        for attribute in ("sigma_m2", "sigma_edge_m2"):
+            sigma = np.array(getattr(self, attribute), dtype=np.float64, copy=True)
+            if sigma.ndim != 1:
+                raise ValueError(
+                    f"a channel cross section must be one-dimensional, got {sigma.shape}"
+                )
+            if not np.all(np.isfinite(sigma)):
+                raise ValueError(f"the {self.reaction!r} cross section must be finite")
+            if np.any(sigma < 0.0):
+                raise ValueError(f"the {self.reaction!r} cross section has a negative value")
+            sigma.flags.writeable = False
+            object.__setattr__(self, attribute, sigma)
 
     @property
     def is_ionisation(self) -> bool:
@@ -190,8 +200,50 @@ class ElectronKinetics:
                     f"channel {channel.reaction!r} carries {channel.sigma_m2.shape} values "
                     f"but the grid has {self.grid.n_cells} cells"
                 )
+            if channel.sigma_edge_m2.shape != (self.grid.n_cells + 1,):
+                raise ValueError(
+                    f"channel {channel.reaction!r} carries {channel.sigma_edge_m2.shape} "
+                    f"values at the cell boundaries but the grid has "
+                    f"{self.grid.n_cells + 1} boundaries"
+                )
         object.__setattr__(self, "momentum_transfer_m2", centres)
         object.__setattr__(self, "momentum_transfer_edge_m2", edges)
+
+    @property
+    def effective_momentum_transfer_m2(self) -> FloatArray:
+        """Reid (1979) eq. (4): ``sigma_m,e + sum_k sigma_k``, at cell centres.
+
+        An inelastic collision randomises the electron's direction just as an elastic one
+        does, so it contributes to momentum transfer whatever it does to energy. Reid
+        derives the momentum equation with both present and shows it keeps the elastic
+        form only if ``sigma_m,e`` is replaced by this sum (for isotropic inelastic
+        scattering, which is what both model gases and most LXCat sets assume).
+
+        He is unusually direct about the consequence, and it is worth quoting because the
+        substitution is easy to make in the wrong direction:
+
+            if equation (5b) is used to determine ``f(eps)``, the momentum transfer cross
+            section that appears in the equation is the *total* cross section for
+            momentum transfer and not the cross section for momentum transfer in elastic
+            collisions.
+
+        Using the elastic cross section alone makes the electrons too mobile and, through
+        the field-heating term, too hot. The error is invisible when the inelastic cross
+        sections are small next to the elastic one — which is the usual case, and why it
+        is worth a named property rather than an inline sum.
+        """
+        total = np.array(self.momentum_transfer_m2, dtype=np.float64, copy=True)
+        for channel in self.channels:
+            total += channel.sigma_m2
+        return total
+
+    @property
+    def effective_momentum_transfer_edge_m2(self) -> FloatArray:
+        """The same sum at the cell boundaries, where the flux terms are evaluated."""
+        total = np.array(self.momentum_transfer_edge_m2, dtype=np.float64, copy=True)
+        for channel in self.channels:
+            total += channel.sigma_edge_m2
+        return total
 
     @property
     def ionisation(self) -> tuple[InelasticChannel, ...]:
@@ -269,6 +321,12 @@ def kinetics_from_set(
             # A threshold process always carries one; the parser refuses otherwise.
             threshold_ev=float(section.threshold_ev or 0.0),
             sigma_m2=interpolate_cross_section(section, grid.centres_ev, below=below, above=above),
+            # Also at the boundaries: this channel contributes to the effective
+            # momentum-transfer cross section of Reid eq. (4), which the flux terms and
+            # the mobility sum both evaluate there.
+            sigma_edge_m2=interpolate_cross_section(
+                section, grid.boundaries_ev, below=below, above=above
+            ),
         )
         for section in sections
         if section.process.has_threshold

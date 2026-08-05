@@ -18,6 +18,7 @@ constraint (doc 00 §4), requires an ADR.
 | [ADR-008](ADR-008-manifest-substrate.md) | Manifest substrate: OmegaConf now, Hydra at the sweep layer | **Accepted** | P1 (G-1.3) |
 | [ADR-009](ADR-009-eedf-solver.md) | EEDF / Boltzmann solver: neither BOLSIG+ nor `bolos` | **Accepted** | P1 (WBS 1.8), and everything downstream of a rate coefficient |
 | [ADR-010](ADR-010-v03-sheath-thickness-gate.md) | V-03's sheath-thickness criterion is unreachable as written | **Accepted** | P1 (G-1.2), and L2's V-03 in P2 |
+| [ADR-011](ADR-011-effective-momentum-transfer.md) | The two-term solver omitted the inelastic contribution to momentum transfer — found by the first published benchmark | **Accepted** | P1 (WBS 1.8), and every rate coefficient |
 
 ## Status values
 

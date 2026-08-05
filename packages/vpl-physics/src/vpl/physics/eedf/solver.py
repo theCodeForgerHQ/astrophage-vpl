@@ -486,14 +486,34 @@ class TwoTermSolver:
     # ── operator assembly ───────────────────────────────────────────────────────
 
     def _elastic_operator(self, reduced_field_si: float) -> FloatArray:
-        """The tridiagonal part: elastic drag, field heating and thermal diffusion."""
+        """The tridiagonal part: elastic drag, field heating and thermal diffusion.
+
+        Two different cross sections appear here, and which goes where is Reid (1979)
+        eq. (5a) rather than a choice:
+
+        - **Field heating** divides by the *effective* momentum-transfer cross section,
+          ``sigma_m,e + sum_k sigma_k``. An inelastic collision randomises direction as
+          surely as an elastic one, so it impedes the drift the field drives. Using the
+          elastic cross section alone makes the electrons too mobile and, through this
+          term, too hot.
+        - **Elastic energy loss** keeps the *elastic* cross section, because ``2 m_e/M``
+          per collision is the energy an elastic collision removes and an inelastic one
+          removes its threshold instead — already accounted for in
+          :meth:`_inelastic_operator`.
+
+        Reid's eq. (5b) substitutes the effective cross section into the loss terms too,
+        and notes the error is negligible. It is: on the Reid ramp gas the two forms
+        differ by 0.03 % in mean energy at 24 Td. The exact form is implemented anyway,
+        since it costs one array.
+        """
         grid = self.grid
         interior = grid.boundaries_ev[1:-1]
-        sigma_m = self.kinetics.momentum_transfer_edge_m2[1:-1]
-        sigma_eps = 2.0 * self.kinetics.mass_ratio * sigma_m
+        sigma_effective = self.kinetics.effective_momentum_transfer_edge_m2[1:-1]
+        sigma_elastic = self.kinetics.momentum_transfer_edge_m2[1:-1]
+        sigma_eps = 2.0 * self.kinetics.mass_ratio * sigma_elastic
 
         drift = -GAMMA * interior**2 * sigma_eps
-        diffusion = (GAMMA / 3.0) * reduced_field_si**2 * interior / sigma_m + (
+        diffusion = (GAMMA / 3.0) * reduced_field_si**2 * interior / sigma_effective + (
             GAMMA * self.gas_temperature_ev * interior**2 * sigma_eps
         )
         a0, a1 = _flux_coefficients(
@@ -680,6 +700,12 @@ class TwoTermSolver:
     def _reduced_mobility(self, f0: FloatArray) -> float:
         """``-(gamma/3) integral (eps/sigma_m) df0/deps deps``, in ``1 / (m V s)``.
 
+        ``sigma_m`` is Reid eq. (4)'s *effective* cross section, the same one the field
+        term of :meth:`_elastic_operator` divides by — his eq. (6) for ``v_dr`` is
+        written with it explicitly. A mobility computed from the elastic cross section
+        alone while the distribution was computed from the effective one would not even
+        be self-consistent.
+
         For a piecewise-constant ``f0`` the derivative is a sum of jumps at the interior
         cell boundaries, so the integral is exactly this sum — no quadrature error, and
         the closed-form constant-collision-frequency result comes out to machine
@@ -687,11 +713,14 @@ class TwoTermSolver:
         """
         grid = self.grid
         interior = grid.boundaries_ev[1:-1]
-        weight = interior / self.kinetics.momentum_transfer_edge_m2[1:-1]
+        weight = interior / self.kinetics.effective_momentum_transfer_edge_m2[1:-1]
         return float(-(GAMMA / 3.0) * np.dot(weight, np.diff(f0)))
 
     def _reduced_diffusion(self, f0: FloatArray) -> float:
-        """``(gamma/3) integral (eps/sigma_m) f0 deps``, in ``1 / (m s)``."""
+        """``(gamma/3) integral (eps/sigma_m) f0 deps``, in ``1 / (m s)`` — Reid eq. (7).
+
+        Effective cross section, for the same reason as :meth:`_reduced_mobility`.
+        """
         grid = self.grid
-        weight = grid.centres_ev / self.kinetics.momentum_transfer_m2
+        weight = grid.centres_ev / self.kinetics.effective_momentum_transfer_m2
         return float((GAMMA / 3.0) * np.dot(weight * grid.widths_ev, f0))

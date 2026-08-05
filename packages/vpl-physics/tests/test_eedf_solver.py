@@ -135,6 +135,7 @@ def _channel(
         process=process,
         threshold_ev=threshold_ev,
         sigma_m2=np.where(grid.centres_ev >= threshold_ev, sigma_m2, 0.0),
+        sigma_edge_m2=np.where(grid.boundaries_ev >= threshold_ev, sigma_m2, 0.0),
     )
 
 

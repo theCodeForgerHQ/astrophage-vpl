@@ -38,7 +38,7 @@ solver.
 | 1.5 | L0 analytic sheath models | Done |
 | 1.6 | L1 fluid solver (FEniCSx) | Done — steady state; BDF2 deferred to P2 |
 | 1.7 | Atomic-data loaders (LXCat, NIST ASD, OpenADAS) | Done — OpenADAS registered, ADF parser deferred to the CR model |
-| 1.8 | Boltzmann/EEDF integration | Done — see [ADR-009](../adr/ADR-009-eedf-solver.md) |
+| 1.8 | Boltzmann/EEDF integration | Done — see [ADR-009](../adr/ADR-009-eedf-solver.md). **Its acceptance criterion was not actually met when this report was first written; see §8** |
 | 1.9 | CI: lint, types, tests, coverage, `ASSUMED` count | Done |
 
 **Test totals:** 1 488 passing in the workspace environment plus 92 in the FEniCSx
@@ -109,6 +109,7 @@ working, not a defect count.
 | [008](../adr/ADR-008-manifest-substrate.md) | **PyYAML cannot parse doc 08 §6's own example manifest.** YAML 1.1's float resolver requires a signed exponent, so `1.0e17` loads as a string |
 | [009](../adr/ADR-009-eedf-solver.md) | Neither doc 08 §2 option is usable: `bolos` calls a SciPy API removed in 1.14, at exactly the three integrals doc 03 §3.2 needs |
 | [010](../adr/ADR-010-v03-sheath-thickness-gate.md) | V-03's `s` criterion is unreachable in the specified envelope; doc 03 §2.1 understates the sheath-edge sensitivity |
+| [011](../adr/ADR-011-effective-momentum-transfer.md) | **Ours, not the documents'.** The two-term solver omitted the inelastic contribution to momentum transfer — a 52 % error in drift velocity that 1 488 internal tests did not find and the first published benchmark did. See §8 |
 
 Two further corrections were made in code without an ADR, both recorded in commits and
 docstrings: doc 08 §4's `ForwardSolver.solve` forbids a steady solve that the rest of the
@@ -146,3 +147,42 @@ registry loader also hardened to ignore non-authored files.
 | `SECONDARY_EMISSION_ENERGY` as a registry entry | Currently a named module constant; should be `sheath.E_se` |
 | GPU throughput measurement | doc 10 §3.2's ~3.2 × 10⁹ particle-steps/s is still an estimate. Gate G-2 should require it measured, as G-1.4 did for L1 |
 | Doc 03 §3.4's implication that Newton converges unaided | It does not; the continuation strategy that makes it work should be written into the document |
+| Lucas-Saelee residual of 1–2 % | See §8 and [ADR-011](../adr/ADR-011-effective-momentum-transfer.md). Two named candidates, both already carried simplifications in ADR-009 |
+
+---
+
+## 8. Amendment — WBS 1.8 did not meet its acceptance criterion
+
+**Added 2026-08-05, after this report was first issued.**
+
+Doc 11 WBS 1.8's acceptance criterion is *"rate coefficients reproduce published Ar
+values"*. §2 above recorded it as done. It was not: every test of the EEDF solver at that
+point was **internal** — analytic limits the solver was built to reach, and convergence of
+its own discretisation. Those catch a solver that disagrees with itself. They cannot catch
+one that is self-consistently wrong.
+
+Supplying the published half found a **52 % error** in the drift velocity.
+[ADR-011](../adr/ADR-011-effective-momentum-transfer.md) records it in full: the momentum-
+transfer cross section omitted the inelastic contribution that Reid (1979) eq. (4)
+requires, which is invisible whenever the inelastic cross sections are small next to the
+elastic one — as they are in every synthetic gas this suite used before.
+
+After the fix, against Flynn et al (2024) `MB(2)`:
+
+| Gas | Quantity | Agreement |
+|---|---|---|
+| Reid ramp, 1 / 12 / 24 Td | `<eps>`, `W`, `N D_T` | **≤ 0.054 %** |
+| Reid 1979 Table 4, all eight fields 1–40 Td | `<eps>`, `W` | **≤ 0.34 %** |
+| Lucas-Saelee, 30 Td | `k_iz` | **+1.83 %** |
+
+The pass criterion is that our disagreement with the two-term column be smaller than the
+gap between the two-term and ten-term columns — the implementation error must be smaller
+than the physics approximation it implements. At 24 Td that gap is 2.9 % and we are at
+0.03 %.
+
+**What this says about the rest of the gate.** The other G-1 criteria were checked against
+external or analytic references — V-01 and V-02 against manufactured solutions, V-03
+against an independent quadrature, G-1.3 against a byte comparison — and are unaffected.
+The one criterion checked only against the code's own behaviour is the one that was wrong.
+That is the lesson worth carrying into G-2, where the PIC kernel will be in exactly the
+same position.
