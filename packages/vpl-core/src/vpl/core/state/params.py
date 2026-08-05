@@ -165,9 +165,9 @@ class PlasmaParams:
         return replace(self, **changes)  # type: ignore[arg-type]
 
     def __repr__(self) -> str:
-        drive = f"{self.rf_frequency:~P}" if self.rf_frequency is not None else "DC"
+        drive = f"{self.rf_frequency:.4g~P}" if self.rf_frequency is not None else "DC"
         return (
-            f"PlasmaParams({self.species.name}, n_0={self.n_0:~.3g P}, "
-            f"T_e={self.T_e_eV:~.3g P}, p={self.pressure.to('mTorr'):~.3g P}, "
-            f"bias={self.bias:~.4g P}, drive={drive})"
+            f"PlasmaParams({self.species.name}, n_0={self.n_0:.3g~P}, "
+            f"T_e={self.T_e_eV:.3g~P}, p={self.pressure.to('mTorr'):.3g~P}, "
+            f"bias={self.bias:.4g~P}, drive={drive})"
         )

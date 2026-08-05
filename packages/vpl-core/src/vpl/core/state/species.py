@@ -45,4 +45,4 @@ class Species:
         return self.charge_number == 0
 
     def __repr__(self) -> str:
-        return f"Species({self.name!r}, mass={self.mass:~P}, Z={self.charge_number:+d})"
+        return f"Species({self.name!r}, mass={self.mass:.5g~P}, Z={self.charge_number:+d})"

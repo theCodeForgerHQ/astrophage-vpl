@@ -263,4 +263,4 @@ class PhaseGrid:
         return int(np.floor(wrapped / self.bin_width_rad)) % self.n_bins
 
     def __repr__(self) -> str:
-        return f"PhaseGrid(n_bins={self.n_bins}, period={self.period:~P})"
+        return f"PhaseGrid(n_bins={self.n_bins}, period={self.period:.4g~P})"
