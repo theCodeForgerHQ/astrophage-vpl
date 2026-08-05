@@ -1,0 +1,42 @@
+#  vpl-inverse — doc 05.
+#
+#  The inverse layer is deliberately ignorant of any particular forward model. doc 08 §3
+#  puts `vpl-inverse` in its own package and doc 08 §8 makes the isolation a CI test, and
+#  doc 05 §7.1 is the reason: the truth generator and the inversion must differ in physics
+#  level, mesh, timestep, collision set and EEDF parameterisation. A package that imported
+#  `vpl.physics` would make committing the inverse crime the path of least resistance —
+#  someone would reach for the solver that was already there. It cannot reach for it.
+#
+#  Consequently the dependency list here is `vpl-core` plus arrays. Everything this package
+#  needs from a forward model arrives as a `numpy` array of predictions.
+
+[project]
+name = "vpl-inverse"
+version = "0.1.0"
+description = "Astrophage VPL — control parameters, priors and per-channel likelihoods."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Team Astrophage" }]
+dependencies = [
+    "vpl-core",
+    "numpy>=2.1",
+    # doc 08 §2 buys linear algebra and special functions rather than rebuilding them.
+    # This package needs three things from SciPy and each would otherwise be hand-rolled
+    # badly: `scipy.special.gammaln` for the Poisson normalisation, `scipy.special.log_expit`
+    # for a logit Jacobian that does not overflow, and `scipy.linalg.cho_factor` for the
+    # correlated-covariance solve of doc 05 §3.1. A hand-written `log(1 + exp(-u))` is the
+    # classic source of silent `inf` in exactly the tail regions a sampler explores.
+    "scipy>=1.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vpl"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# PEP 561. Without this marker every downstream consumer silently loses type checking
+# against this package, including the inference engines that build on it.
+"src/vpl/inverse/py.typed" = "vpl/inverse/py.typed"

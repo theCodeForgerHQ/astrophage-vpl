@@ -1,0 +1,81 @@
+# Prior hyperparameters and inversion thresholds — doc 05 §2.1, §3.1.
+#
+# doc 05 §2.1's table is a specification of *priors*, and a prior width is a number with
+# exactly the same standing as a cross section: it changes the answer, so doc 08 §5 will
+# not have it appear as a literal in code. Most of the table is already registered
+# elsewhere and is read from there rather than duplicated here —
+#
+#   n_0        RP1.n_0.sweep_range        [1e15, 1e19] m^-3   (operating-point.yaml)
+#   T_e median RP1.T_e                    3.0 eV              (operating-point.yaml)
+#   T_i        RP1.T_i.sweep_range        [0.02, 0.5] eV      (operating-point.yaml)
+#   V_w        RP1.bias.uncertainty       relative, 1 %       (operating-point.yaml)
+#   gamma_se   sheath.gamma_se_W          0.10 +/- 0.03       (physics.yaml)
+#
+# — so what remains here is the four numbers doc 05 states and no other document does.
+# Duplicating the five above would create two places for one value to be wrong in.
+#
+# All four are DESIGN class. doc 05 §4.3 is explicit that a regularisation choice is a
+# parameter and not a convention, and doc 09 §1 requires a DESIGN entry to declare the
+# range it is swept over — which is precisely the prior-sensitivity study §4.3 asks for.
+
+- id: prior.T_e.log_sigma
+  description: >-
+    Log-scale width of the log-normal prior on the bulk electron temperature: doc 05 §2.1
+    gives "log-normal, mu = 3 eV, sigma = 0.4", the median being RP1.T_e. As a log-scale
+    width, 0.4 is a factor of exp(0.4) = 1.49 per sigma, so the central 95 % of the prior
+    spans roughly 1.4 to 6.6 eV — wide enough to contain every regime of the doc 01 §2.4
+    envelope without being so wide that it stops regularising the n_0-T_e degeneracy of
+    doc 05 §6.2.
+  value: 0.4
+  units: dimensionless
+  class: DESIGN
+  source: "doc 05 §2.1 — the Level A prior table"
+  sweep_range: [0.1, 1.5]
+  affects: [inverse.posterior_width, inverse.n0_Te_degeneracy]
+  category: numerics
+
+- id: prior.p.relative_sigma
+  description: >-
+    One-sigma relative uncertainty of the neutral-pressure reading, which doc 05 §2.1
+    enters as an informative prior rather than as a fixed value ("informative —
+    gauge-measured, sigma = 2 %"). It is applied on the log scale, so it is a genuine
+    relative uncertainty that cannot put negative probability mass on a negative pressure.
+  value: 0.02
+  units: dimensionless
+  class: DESIGN
+  source: "doc 05 §2.1; consistent with the 2 % gauge term of doc 06 §5 (Thomson chain)"
+  sweep_range: [0.005, 0.10]
+  affects: [inverse.posterior_width, physics.neutral_density]
+  category: instrument
+
+- id: eedf.kappa
+  description: >-
+    EEDF shape exponent in f(eps) ~ exp(-(eps/eps_0)^kappa). kappa = 1 is Maxwellian and
+    kappa = 2 Druyvesteyn, the two forms doc 03 §3.2 names as the realistic bracket for a
+    low-pressure sheath. doc 05 §2.1 makes it a free Level A parameter with a uniform
+    prior on [1, 5], and doc 05 §7.1 makes the kappa parameterisation the *inversion*
+    side of the mandatory EEDF mismatch — truth is generated with the EEDF the PIC run
+    actually produces, which is not of this form.
+  value: 1.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 05 §2.1 — uniform [1, 5] (Maxwellian -> Druyvesteyn); doc 03 §3.2"
+  sweep_range: [1.0, 5.0]
+  affects: [physics.eedf_shape, oes.line_ratios, inverse.theta_c]
+  category: physics
+
+- id: inverse.oes_gaussian_switch
+  description: >-
+    Photoelectron count above which the OES likelihood switches from Poisson to Gaussian.
+    doc 05 §3.1 specifies "Poisson for weak lines; Gaussian for bright lines above ~100
+    pe. Explicit switch at a configured threshold." At 100 counts the Gaussian
+    approximation to the Poisson log-pmf is accurate to better than 1 % of a log-unit
+    across +/- 3 sigma, while below ~30 it is visibly skewed — which is the regime doc 02
+    §7.1 puts the faint lines in.
+  value: 100.0
+  units: dimensionless
+  class: DESIGN
+  source: "doc 05 §3.1 — 'explicit switch at a configured threshold'"
+  sweep_range: [20.0, 1000.0]
+  affects: [inverse.oes_likelihood, inverse.posterior_width]
+  category: numerics
