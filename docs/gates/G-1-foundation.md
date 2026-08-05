@@ -41,13 +41,13 @@ solver.
 | 1.8 | Boltzmann/EEDF integration | Done — see [ADR-009](../adr/ADR-009-eedf-solver.md). **Its acceptance criterion was not actually met when this report was first written; see §8** |
 | 1.9 | CI: lint, types, tests, coverage, `ASSUMED` count | Done |
 
-**Test totals:** 1 488 passing in the workspace environment plus 92 in the FEniCSx
+**Test totals:** 1 533 passing in the workspace environment plus 92 in the FEniCSx
 environment. doc 08 §8 requires the two classes to be reported separately:
 
 | Class | Count |
 |---|---|
-| Physics verification (MMS, convergence, conservation, analytic limits) | **144** workspace + **30** FEniCSx |
-| Software correctness | **1 344** |
+| Physics verification (MMS, convergence, conservation, analytic limits, published swarm benchmarks) | **158** workspace + **30** FEniCSx |
+| Software correctness | **1 375** |
 
 ---
 
@@ -125,11 +125,16 @@ on the development machine.
 
 | | Development (macOS/arm64) | Reference (RTX A4000, WSL2 Ubuntu 24.04) |
 |---|---|---|
-| Tests | 1 488 pass | 829 pass at the time of the last full run |
-| `mypy --strict` | clean | clean |
+| Tests | **1 533** pass, 5 skipped | **1 531** pass, 7 skipped (`LANG=C`) |
+| FEniCSx gates V-01…V-04 | not run locally | **92** pass |
+| `mypy --strict` | clean, 78 files | clean, 78 files |
 | ruff | clean | clean |
+| `ASSUMED` count | 0 | 0 |
 | FEniCSx | 0.9.0 | 0.9.0 |
 | Python / NumPy / SciPy | 3.12.13 / 2.5.1 / 1.18.0 | identical |
+
+The two extra skips on the reference machine are the provenance tests that need a git
+checkout; it holds an exported tree rather than a clone.
 
 Running on the reference machine found a portability defect the development machine could
 not: every text read used Python's *locale* default encoding, which on a `LANG=C` machine
