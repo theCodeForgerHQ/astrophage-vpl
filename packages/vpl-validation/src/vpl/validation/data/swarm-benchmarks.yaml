@@ -1,0 +1,128 @@
+# Published electron-swarm benchmarks — doc 09 §1 class PUBLISHED.
+#
+# These are the outside opinion on the two-term Boltzmann solver of ADR-009. Every value
+# is transcribed from a named table in a named paper; none is computed here, and none is
+# rounded. A reviewer should be able to open the cited table and diff it against this
+# file without reading any Python.
+#
+# ## Why these two gases
+#
+# They are synthetic. Neither is argon, and that is the point: a model gas has no atomic
+# data uncertainty, so every code solves an identical problem and a disagreement is
+# attributable to the solver rather than to the database. They are the standard pair for
+# verifying electron Boltzmann codes.
+#
+# ## Why the term count is recorded
+#
+# Our solver is two-term. Judging it against a converged multi-term column would report a
+# known physics approximation as a solver defect. Both columns are carried so the
+# approximation itself is bounded rather than assumed small — the same discipline
+# ADR-009 applies to the growth-model correction.
+#
+# ## Note on exponents
+#
+# Every exponent below is written signed (`1.275e+04`, not `1.275e4`). ADR-008 records
+# why: PyYAML implements YAML 1.1, whose float resolver requires a signed exponent, and
+# an unsigned one loads silently as a string.
+
+citations:
+  reid-1979: >-
+    I D Reid, "An investigation of the accuracy of numerical solutions of Boltzmann's
+    equation for electron swarms in gases with large inelastic cross sections",
+    Aust. J. Phys. 32 (1979) 231-254, DOI 10.1071/PH790231. Model gas: §4a(i) and
+    §4a(ii). Values: Table 4, columns v_dr(B), <e>(B), D_perp(B), for k = 10 A^2 eV^-1.
+  flynn-2024: >-
+    M Flynn, L Vialetto, A Fierro, A Neuber and J Stephens, "Benchmark calculations for
+    anisotropic scattering in kinetic models for low temperature plasma",
+    J. Phys. D: Appl. Phys. 57 (2024) 255204, DOI 10.1088/1361-6463/ad3477. Model gas
+    definitions: eqs. (27) and (28). Values: Table 1 (RR) and Table 2 (LS), ISO-ISO
+    rows, MultiBolt columns MB(2) and MB(10).
+  lucas-saelee-1975: >-
+    J Lucas and H T Saelee, "A comparison of a Monte Carlo simulation and the Boltzmann
+    solution for electron swarm motion in gases", J. Phys. D: Appl. Phys. 8 (1975)
+    640-650. NOT CONSULTED DIRECTLY — the primary paper is paywalled and no open copy
+    was obtainable. The model-gas definition used here is Flynn et al (2024) eq. (28),
+    which restates it. See the module docstring; this is a real limitation, not a
+    formality.
+
+# The transverse (flux) reduced diffusion N*D_T is in 1/(m s) throughout.
+#
+# Reid tabulates D_perp in 10^5 cm^2 s^-1 at his stated gas number density
+# N = 10^17 cm^-3 (§4a(i)). Multiplying gives 10^24 (m s)^-1, and the result agrees with
+# Flynn's independently computed N*D_FT column to three digits at both shared fields.
+# That agreement is what confirms the unit reading, so it is asserted by a test rather
+# than trusted here.
+
+benchmarks:
+  # ---------------------------------------------------------------------------------
+  # Reid ramp, k = 10 A^2 eV^-1 — Reid (1979) Table 4, "B" (Boltzmann) columns.
+  #
+  # Reid's Boltzmann code is a conventional two-term solution, so this column is
+  # directly comparable with ours. His Monte Carlo column is the accurate answer and is
+  # carried below as terms: 10 in spirit — but it is NOT recorded as such, because a
+  # Monte Carlo result is not a term-truncated one. Only the multi-term Boltzmann values
+  # of Flynn et al are labelled terms: 10.
+  # ---------------------------------------------------------------------------------
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 1.0,
+     mean_energy_ev: 0.1016, drift_velocity_m_per_s: 1.275e+04,
+     reduced_transverse_diffusion: 0.990e+24}
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 5.0,
+     mean_energy_ev: 0.1742, drift_velocity_m_per_s: 4.36e+04,
+     reduced_transverse_diffusion: 1.226e+24}
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 10.0,
+     mean_energy_ev: 0.2470, drift_velocity_m_per_s: 6.45e+04,
+     reduced_transverse_diffusion: 1.343e+24}
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 15.0,
+     mean_energy_ev: 0.312, drift_velocity_m_per_s: 7.73e+04,
+     reduced_transverse_diffusion: 1.398e+24}
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 20.0,
+     mean_energy_ev: 0.371, drift_velocity_m_per_s: 8.64e+04,
+     reduced_transverse_diffusion: 1.431e+24}
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 24.0,
+     mean_energy_ev: 0.416, drift_velocity_m_per_s: 9.15e+04,
+     reduced_transverse_diffusion: 1.438e+24}
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 30.0,
+     mean_energy_ev: 0.480, drift_velocity_m_per_s: 9.76e+04,
+     reduced_transverse_diffusion: 1.447e+24}
+  - {gas: reid-ramp, source: reid, citation: reid-1979, terms: 2, reduced_field_td: 40.0,
+     mean_energy_ev: 0.579, drift_velocity_m_per_s: 1.050e+05,
+     reduced_transverse_diffusion: 1.448e+24}
+
+  # ---------------------------------------------------------------------------------
+  # Reid ramp — Flynn et al (2024) Table 1, ISO-ISO rows.
+  # <e> is tabulated there in 10^-1 eV and W_F in 10^4 m/s; both are expanded here.
+  # ---------------------------------------------------------------------------------
+  - {gas: reid-ramp, source: flynn, citation: flynn-2024, terms: 2, reduced_field_td: 1.0,
+     mean_energy_ev: 0.10150, drift_velocity_m_per_s: 1.2750e+04,
+     reduced_transverse_diffusion: 0.9905e+24}
+  - {gas: reid-ramp, source: flynn, citation: flynn-2024, terms: 2, reduced_field_td: 12.0,
+     mean_energy_ev: 0.27350, drift_velocity_m_per_s: 7.0290e+04,
+     reduced_transverse_diffusion: 1.3690e+24}
+  - {gas: reid-ramp, source: flynn, citation: flynn-2024, terms: 2, reduced_field_td: 24.0,
+     mean_energy_ev: 0.41620, drift_velocity_m_per_s: 9.1447e+04,
+     reduced_transverse_diffusion: 1.4382e+24}
+
+  - {gas: reid-ramp, source: flynn, citation: flynn-2024, terms: 10, reduced_field_td: 1.0,
+     mean_energy_ev: 0.10150, drift_velocity_m_per_s: 1.2710e+04,
+     reduced_transverse_diffusion: 0.9751e+24}
+  - {gas: reid-ramp, source: flynn, citation: flynn-2024, terms: 10, reduced_field_td: 12.0,
+     mean_energy_ev: 0.26890, drift_velocity_m_per_s: 6.8380e+04,
+     reduced_transverse_diffusion: 1.1350e+24}
+  - {gas: reid-ramp, source: flynn, citation: flynn-2024, terms: 10, reduced_field_td: 24.0,
+     mean_energy_ev: 0.40790, drift_velocity_m_per_s: 8.8857e+04,
+     reduced_transverse_diffusion: 1.1342e+24}
+
+  # ---------------------------------------------------------------------------------
+  # Lucas-Saelee — Flynn et al (2024) Table 2, ISO-ISO rows, flux quantities.
+  # <e> is in eV, W_F in 10^5 m/s, N*D_FT in 10^25 (m s)^-1, k_iz in 10^-16 m^3 s^-1.
+  #
+  # This is the only point in the file carrying an ionisation rate coefficient, and it
+  # is the reason the gas is here: doc 11 WBS 1.8 asks for rate coefficients against
+  # published values, and the Reid gas is conservative.
+  # ---------------------------------------------------------------------------------
+  - {gas: lucas-saelee, source: flynn, citation: flynn-2024, terms: 2, reduced_field_td: 30.0,
+     mean_energy_ev: 6.2840, drift_velocity_m_per_s: 2.0895e+05,
+     reduced_transverse_diffusion: 2.9940e+25, ionisation_rate_m3_per_s: 2.7230e-16}
+  - {gas: lucas-saelee, source: flynn, citation: flynn-2024, terms: 10, reduced_field_td: 30.0,
+     mean_energy_ev: 6.2589, drift_velocity_m_per_s: 2.0759e+05,
+     reduced_transverse_diffusion: 2.8547e+25, ionisation_rate_m3_per_s: 2.7156e-16}

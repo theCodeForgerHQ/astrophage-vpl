@@ -23,6 +23,11 @@ dependencies = [
     # Symbolic differentiation removes that failure mode entirely; doc 08 §2's rule is
     # to buy mature libraries rather than rebuild them, and this is one.
     "sympy>=1.13",
+    # The published swarm benchmarks are transcribed tables, held as data so a reviewer
+    # can diff them against the cited paper without reading Python. Declared explicitly
+    # rather than leaned on through vpl-core: a package that imports yaml depends on
+    # yaml, and a transitive dependency is one refactor away from disappearing.
+    "pyyaml>=6.0",
 ]
 
 [build-system]
@@ -31,3 +36,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vpl"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# PEP 561. vpl-validation was the only package of the four without this marker, so
+# anything importing it silently lost type checking — including the physics tests that
+# are judged against the benchmarks below.
+"src/vpl/validation/py.typed" = "vpl/validation/py.typed"
+# The published benchmark tables must travel with the package. Without this an
+# installed wheel imports cleanly and then fails at the first benchmark, which is
+# the worst time to discover a packaging error.
+"src/vpl/validation/data" = "vpl/validation/data"
