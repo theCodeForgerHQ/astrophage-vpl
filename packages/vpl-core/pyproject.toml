@@ -14,6 +14,10 @@ authors = [{ name = "Team Astrophage" }]
 dependencies = [
     "numpy>=2.1",
     "pint>=0.24",
+    # doc 09 §2.5: fundamental constants come from CODATA via scipy.constants,
+    # never hand-typed. A mistyped electron mass is plausible, undetectable and
+    # catastrophic. SciPy is already "buy" in the doc 08 §2 table.
+    "scipy>=1.14",
 ]
 
 [project.optional-dependencies]

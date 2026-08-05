@@ -7,6 +7,16 @@ inverse solver stay ignorant of which fidelity level produced its forward model
 (doc 00 E1).
 """
 
+from vpl.core.state.fidelity import Fidelity
 from vpl.core.state.grid import PhaseGrid, SpatialGrid, TimeGrid
+from vpl.core.state.params import PlasmaParams
+from vpl.core.state.species import Species
 
-__all__ = ["PhaseGrid", "SpatialGrid", "TimeGrid"]
+__all__ = [
+    "Fidelity",
+    "PhaseGrid",
+    "PlasmaParams",
+    "SpatialGrid",
+    "Species",
+    "TimeGrid",
+]

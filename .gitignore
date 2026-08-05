@@ -45,3 +45,9 @@ mlruns/
 *.synctex.gz
 *.fls
 *.fdb_latexmk
+
+# Coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
