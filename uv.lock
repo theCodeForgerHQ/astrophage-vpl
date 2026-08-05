@@ -6,6 +6,7 @@ requires-python = "==3.12.*"
 members = [
     "astrophage-vpl-workspace",
     "vpl-core",
+    "vpl-physics",
 ]
 
 [[package]]
@@ -515,6 +516,23 @@ requires-dist = [
     { name = "zarr", marker = "extra == 'storage'", specifier = ">=2.18" },
 ]
 provides-extras = ["storage"]
+
+[[package]]
+name = "vpl-physics"
+version = "0.1.0"
+source = { editable = "packages/vpl-physics" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "vpl-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "scipy", specifier = ">=1.14" },
+    { name = "vpl-core", editable = "packages/vpl-core" },
+]
 
 [[package]]
 name = "zarr"

@@ -107,7 +107,10 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 disallow_any_generics = true
-mypy_path = "packages/vpl-core/src"
+# Every package's source root. `vpl` is an implicit namespace package, so a path
+# missing here makes mypy resolve the same file under two module names and report
+# phantom duplicate-definition errors. Append a package here when you add one.
+mypy_path = "packages/vpl-core/src:packages/vpl-physics/src"
 namespace_packages = true
 explicit_package_bases = true
 

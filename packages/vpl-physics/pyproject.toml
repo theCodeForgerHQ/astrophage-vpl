@@ -1,0 +1,29 @@
+#  vpl-physics — the forward operator F1 of doc 03.
+#
+#  L0 (analytic) lands first: it is the verification anchor that V-03 checks L1 and L2
+#  against, and it depends on nothing heavier than NumPy and SciPy. The L1 (FEniCSx) and
+#  L2 (PIC) levels arrive behind optional dependency groups so that `pip install
+#  vpl-physics` does not drag a PDE stack in for a caller who only wants the analytic
+#  limit — doc 08 §3's stated reason for separately-installable packages.
+
+[project]
+name = "vpl-physics"
+version = "0.1.0"
+description = "Astrophage VPL — the forward physics operator F1: analytic, fluid, kinetic and surrogate sheath models."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Team Astrophage" }]
+dependencies = [
+    "vpl-core",
+    "numpy>=2.1",
+    # doc 08 §2: SciPy is "buy". The L0 layer reaches it through vpl.core.constants
+    # (CODATA), and the levels above it will want its special functions and quadrature.
+    "scipy>=1.14",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vpl"]

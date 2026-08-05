@@ -64,16 +64,22 @@
 - id: sheath.gamma_i
   description: >-
     Adiabatic index for ions in the Bohm speed, c_s = sqrt(e(T_e + gamma_i T_i)/m_i).
-    doc 03 §2.1 gives gamma_i = 3 for one-dimensional adiabatic ions, while doc 01 §2.2
-    evaluates c_s = 2.69 km/s from the cold-ion form. Both appear in the Baseline
-    documents; the discrepancy is 0.8% at RP-1 because T_i << T_e, and it is registered
-    here rather than silently resolved in whichever module happened to need it first.
-  value: 3.0
+    doc 03 §2.1 states gamma_i = 3 for one-dimensional adiabatic ions, but doc 03 §2.3's
+    own arithmetic uses the cold-ion form (Gamma_i = 0.61e17 x 2691, and 2691 m/s is
+    sqrt(e T_e/m_i) with no ion term), as does doc 01 §2.2. Doc 03 therefore disagrees
+    with itself between its statement and its worked example.
+    The nominal is set to the value that reproduces every printed number, so the L0
+    verification anchor matches the specification it is checking L1 and L2 against; the
+    range spans to the adiabatic value so the choice is swept rather than assumed.
+    At RP-1 the two differ by 2.5% in c_s and move Gamma_E from 6.58 to 6.74 kW/m^2 —
+    small enough to pass unnoticed in a document, large enough to spend an eighth of the
+    R-ACC-5 error budget on a convention.
+  value: 0.0
   units: dimensionless
   class: PUBLISHED
-  source: "doc 03 §2.1; Riemann (1991), the Bohm criterion review"
-  sweep_range: [1.0, 3.0]
-  affects: [physics.bohm_speed, physics.ion_flux]
+  source: "doc 03 §2.1 (states 3) vs doc 03 §2.3 and doc 01 §2.2 (compute with 0); Riemann (1991)"
+  sweep_range: [0.0, 3.0]
+  affects: [physics.bohm_speed, physics.ion_flux, physics.ion_energy_flux]
   category: physics
 
 - id: sheath.gamma_se_W

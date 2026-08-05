@@ -39,6 +39,9 @@ build-backend = "hatchling.build"
 packages = ["src/vpl"]
 
 [tool.hatch.build.targets.wheel.force-include]
+# PEP 561: without this marker every downstream package silently loses type checking
+# against vpl-core, which is the one package doc 08 §12 puts under --strict.
+"src/vpl/core/py.typed" = "vpl/core/py.typed"
 # The registry data must travel with the package, or an installed wheel has no
 # source of numeric defaults at all (doc 08 §5).
 "src/vpl/core/params/data" = "vpl/core/params/data"
