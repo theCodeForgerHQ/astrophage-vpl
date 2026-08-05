@@ -118,7 +118,7 @@ explicit_package_bases = true
 # Third-party scientific stack ships incomplete or absent stubs.
 # pint is deliberately NOT on this list: it ships py.typed, and vpl.core.units is
 # checked against its real signatures.
-module = ["scipy.*", "h5py.*", "zarr.*", "matplotlib.*"]
+module = ["scipy.*", "h5py.*", "zarr.*", "pyarrow.*", "matplotlib.*"]
 ignore_missing_imports = true
 
 # ─────────────────────────────────────────────────────────────────────────────
