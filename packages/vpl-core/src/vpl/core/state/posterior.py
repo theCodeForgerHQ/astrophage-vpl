@@ -48,6 +48,7 @@ from numpy.typing import NDArray
 from vpl.core.provenance import Tier
 
 __all__ = [
+    "DEFAULT_CREDIBLE_LEVEL",
     "GATE_MAX_DIVERGENCES",
     "GATE_MAX_R_HAT",
     "GATE_MIN_ESS",
@@ -75,6 +76,14 @@ GATE_MIN_ESS: Final[float] = 400.0
 #: A divergence means the sampler failed to explore a region of the posterior, so the
 #: samples are biased in a direction nobody can bound. There is no "acceptable few".
 GATE_MAX_DIVERGENCES: Final[int] = 0
+
+#: The credible level every gate and report is stated at.
+#:
+#: doc 00 S4 makes "the empirical coverage of the 95 % credible interval" a pass/fail
+#: criterion, gate G-V4 requires it in [0.93, 0.97], and doc 06 §8's reporting standard
+#: prints it. One named constant, so the default interval and the gate that checks it
+#: cannot drift apart.
+DEFAULT_CREDIBLE_LEVEL: Final[float] = 0.95
 
 #: Quantities that are functions of the samples rather than samples themselves, keyed by
 #: name. Doc 05 §10 requires ``Gamma_E(z, t)``, ``Gamma_i``, ``<E_i>`` and the wall IEDF
@@ -505,7 +514,9 @@ class Posterior:
         """
         return np.asarray(np.mean(self._values_for(name), axis=(0, 1)), dtype=np.float64)
 
-    def credible_interval(self, name: str, level: float = 0.95) -> CredibleInterval:
+    def credible_interval(
+        self, name: str, level: float = DEFAULT_CREDIBLE_LEVEL
+    ) -> CredibleInterval:
         """Equal-tailed credible interval — doc 06 §7.1, gate G-V4.
 
         Equal-tailed rather than highest-density: doc 06 §7.1 defines coverage as

@@ -47,6 +47,20 @@ jobs:
       # contract layer; an untyped contract is not a contract.
       - run: uv run mypy packages/vpl-core/src
 
+  registry:
+    name: Parameter registry discipline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-packages --all-groups
+      # doc 08 §5: fails on a numeric literal in physics code outside the registry or a
+      # named constant. doc 00 C1: reports the ASSUMED count and fails on an increase.
+      - name: Literal rule and ASSUMED metric
+        run: uv run vpl-lint packages/vpl-core packages/vpl-physics
+
   test:
     name: Tests and coverage
     runs-on: ubuntu-latest

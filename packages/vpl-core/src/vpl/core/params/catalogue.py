@@ -28,6 +28,16 @@ __all__ = ["DEFAULT_REGISTRY_DIR", "ParameterRegistry", "default_registry"]
 #: Where the registry files that ship with the package live.
 DEFAULT_REGISTRY_DIR = Path(__file__).parent / "data"
 
+#: Similarity threshold for the "did you mean" hint on an unknown parameter id.
+#:
+#: An ergonomic knob, not a physical quantity — but it is named because doc 08 §5's rule
+#: does not carve out exceptions for numbers whose author was confident they did not
+#: matter, and that is the point of the rule.
+_SUGGESTION_CUTOFF = 0.6
+
+#: How many suggestions to offer. More than a handful stops being a hint.
+_MAX_SUGGESTIONS = 3
+
 _REQUIRED_KEYS = frozenset({"id", "description", "value", "units", "class", "category"})
 _OPTIONAL_KEYS = frozenset({"source", "uncertainty", "sweep_range", "affects"})
 _KNOWN_KEYS = _REQUIRED_KEYS | _OPTIONAL_KEYS
@@ -143,7 +153,9 @@ class ParameterRegistry:
         try:
             return self._entries[entry_id]
         except KeyError:
-            near = difflib.get_close_matches(entry_id, self._entries, n=3, cutoff=0.6)
+            near = difflib.get_close_matches(
+                entry_id, self._entries, n=_MAX_SUGGESTIONS, cutoff=_SUGGESTION_CUTOFF
+            )
             hint = f" Did you mean: {', '.join(near)}?" if near else ""
             raise KeyError(f"no registered parameter {entry_id!r}.{hint}") from None
 

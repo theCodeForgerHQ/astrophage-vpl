@@ -31,6 +31,11 @@ storage = [
     "pyarrow>=18.0",
 ]
 
+[project.scripts]
+# doc 08 §5's rule ships with the framework rather than living in a CI script, so a
+# plugin author can run the same check the core is held to.
+vpl-lint = "vpl.core.lint:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

@@ -1,0 +1,4 @@
+{
+  "assumed_count": 0,
+  "_comment": "doc 00 C1: the ASSUMED-class count is a tracked project metric and its increase fails the build. doc 09 §1 sets the target to zero before Phase 2 exit. Raising this number is a deliberate, reviewable act."
+}
