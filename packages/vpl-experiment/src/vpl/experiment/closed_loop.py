@@ -90,7 +90,7 @@ remaining six are held at their RP-1 reference values, for two different reasons
 ## The OES instrument this harness uses is a verification fixture, not doc 02's instrument
 
 The level system built in :func:`_reference_level_system` is "argon-shaped, not argon" —
-three levels and one emission line, following the same convention
+four levels and two emission lines, following the same convention
 `packages/vpl-instruments/tests/oes_system.py` uses for the OES package's own unit tests:
 energies and degeneracies chosen to look like the real Ar I metastable/resonant structure of
 doc 02 §6.3, with Born-like synthetic cross sections rather than an LXCat set. Every other
@@ -235,6 +235,7 @@ from vpl.inverse.priors import Prior, default_control_prior
 from vpl.physics.analytic.sheath import AnalyticSheathSolver, ion_energy_flux
 from vpl.physics.eedf.analytic import DRUYVESTEYN_KAPPA, generalised_eedf
 from vpl.physics.eedf.grid import EnergyGrid
+from vpl.validation.line_ratios import HC_EV_NM
 from vpl.validation.sealed import SealedTruth, Tier, tier_of_configuration
 
 if TYPE_CHECKING:
@@ -246,6 +247,7 @@ if TYPE_CHECKING:
     from vpl.physics.fluid.sheath import FluidSheathSolver
 
 __all__ = [
+    "SECOND_LINE_WAVELENGTH_NM",
     "T0_RELATIVE_TOLERANCE",
     "ClosedLoopReport",
     "run_t0",
@@ -265,6 +267,7 @@ type FloatArray = NDArray[np.float64]
 _GROUND: Final[str] = "g"
 _METASTABLE: Final[str] = "m"
 _RADIATING: Final[str] = "p"
+_SECOND_RADIATING: Final[str] = "q"
 
 _METASTABLE_ENERGY_EV: Final[float] = 11.5
 _RADIATING_ENERGY_EV: Final[float] = 13.1
@@ -273,6 +276,104 @@ _RADIATING_DEGENERACY: Final[int] = 7
 
 _LINE_WAVELENGTH_NM: Final[float] = 811.53
 _LINE_A_UL_PER_S: Final[float] = 3.31e7
+
+# ─── the second emission line ──────────────────────────────────────────────────────
+#
+# ## Why a second line at all — doc 05 §6.2's identifiability question, concretely
+#
+# With one line the plasma density is carried almost entirely by the spectrum's overall
+# *brightness*, and brightness is exactly what doc 04 §7.3's radiometric calibration is
+# uncertain about (`OES-C1.radiometric_uncertainty`, 6 %). "6 % denser plasma" and "6 %
+# bright lamp" then produce the same data, so `n_0` is only weakly identified the moment
+# that uncertainty is admitted. A second line changes the spectrum's **shape**, and shape
+# survives a scaling error — a uniform radiometric factor multiplies both lines equally and
+# cancels in their ratio exactly, because both travel the same optics.
+#
+# **What was measured here, stated narrowly, because the loose version is wrong.** The
+# `PosteriorNotPositiveDefiniteError` that motivated this work was observed in the
+# *multi-channel* configuration (`vpl.experiment.channels_interferometry`), not in this
+# OES-only harness: a control run of `_run(noise=True, imperfect_calibration=True)` with
+# the second line's supply zeroed — i.e. the single-line spectrum this module had before —
+# still produces a positive-definite Hessian and a real interval at seeds 0, 1 and 2. So
+# "one line makes the posterior stop existing" is **not** a claim this module's own numbers
+# support, and it is not made. What this module's numbers do support, at T1 with
+# calibration on, seeds 0/1/2:
+#
+# * relative error on `Gamma_E` improves 10x / 3.2x / 4.1x (2.58e-4 -> 2.54e-5,
+#   3.87e-3 -> 1.20e-3, 3.18e-3 -> 7.77e-4);
+# * the 90 % interval tightens 2.4x / 3.6x / 3.3x (+-0.112 % -> +-0.046 %, and so on);
+# * along the `Gamma_i ~ n_0 sqrt(T_e)` degeneracy ridge that doc 05 §6.2 names, the OES
+#   channel's own penalty for a `k = 1.05` step rises from 2.445e3 to 2.287e4 — a factor
+#   of 9.35 more information in exactly the direction the project is stuck on. That number
+#   is `test_channels.py`'s own measurement, not one invented here.
+#
+# No separate "ratio observable" is built, deliberately. `OesInstrument.likelihood` already
+# scores the calibration as a *coherent* rank-one term (`vpl.instruments.coherent`), which
+# projects out precisely the direction a uniform fractional scaling moves the prediction
+# along — the direction a ratio is by definition invariant to. So the ratio's information
+# already survives inside the full-spectrum likelihood, while the absolute scale is
+# down-weighted rather than discarded. A hand-built ratio would throw the absolute
+# information away instead, which is strictly worse. See `test_line_ratio.py`, which is
+# where both properties are actually checked rather than asserted in prose.
+#
+# ## Why this line, and not real argon's 750.4 nm
+#
+# doc 02 §6.3's own diagnostic pair is 750.4 nm (2p1 -> 1s2, near-pure direct excitation
+# from ground) against 811.53 nm (2p9 -> 1s5, metastable-fed). That pair **cannot be
+# observed by doc 02 §6.2's spectrograph in one frame**: `Spectrograph.from_registry` is a
+# 750 mm Czerny-Turner at 0.62 nm/mm across 1024 x 13 um pixels, so one grating setting
+# covers 5.85 nm — 808.61 to 814.45 nm around this harness's centre. 750.4 nm is 61 nm
+# outside it. Widening the window is not a free choice either: it would mean a different
+# grating or a different detector, i.e. inventing a second instrument alongside the one
+# doc 02 specifies, which is exactly what the module docstring's "what is synthetic here is
+# the atomic data, not the optics" convention forbids. So the second line is sited *inside*
+# the real window instead.
+#
+# Real argon offers no help there: every Ar I line inside a 5.85 nm window near 811 nm is a
+# 4p -> 4s transition, and the whole 4p manifold spans ~0.6 eV, so any two of them have
+# near-identical excitation thresholds and a ratio that barely moves with `T_e`. The
+# threshold *contrast* is the entire mechanism, so it is kept and the atomic data is shaped
+# — the same "argon-shaped, not argon" trade the three existing levels already make.
+#
+# ## What is chosen and what follows from it
+#
+# Exactly one number is chosen here: `SECOND_LINE_WAVELENGTH_NM`, and it is an *optics*
+# choice (where on the detector to put the line), not an atomic-data claim. The radiating
+# level's energy is then **derived** from it — the photon energy of the emitted line plus
+# the level it decays to — so the level table and the wavelength cannot disagree, and no
+# new unsourced energy is asserted. `HC_EV_NM` comes from CODATA via
+# :mod:`vpl.core.constants`, never typed in (doc 09 §2.5).
+
+#: Where the second line sits on the detector. Chosen, not transcribed: ~2 nm below the
+#: 811.53 nm centre, which is ~80 instrument widths (`OES-S4.instrument_fwhm` = 0.026 nm)
+#: from the first line and ~0.9 nm inside the low edge of the 808.61-814.45 nm window, so
+#: both lines are fully contained and completely resolved from each other. Any value in the
+#: window's lower half would serve; this one is not tuned to a result.
+SECOND_LINE_WAVELENGTH_NM: Final[float] = 809.5
+
+#: The second radiating level, **derived** rather than chosen: it decays to `_RADIATING`
+#: emitting one `SECOND_LINE_WAVELENGTH_NM` photon, so its energy is fixed by the line's
+#: placement. That makes it ~1.53 eV above `_RADIATING_ENERGY_EV` — the threshold contrast
+#: that is the entire point (see the block comment above and `test_line_ratio.py`'s
+#: `test_the_two_lines_have_genuinely_different_thresholds`). It is fed **only** from the
+#: ground state, and is deliberately left out of the metastable cascade, mirroring the way
+#: doc 02 §6.3's 750.4 nm line is near-pure direct excitation while 811.53 nm is
+#: metastable-fed: a high-threshold level is populated by the *tail* of the electron
+#: distribution, a metastable-fed one by its *bulk*, and the ratio of the two is what tracks
+#: `T_e`.
+_SECOND_RADIATING_ENERGY_EV: Final[float] = _RADIATING_ENERGY_EV + HC_EV_NM / (
+    SECOND_LINE_WAVELENGTH_NM
+)
+
+#: Shaped, like `_RADIATING_DEGENERACY` and `_METASTABLE_DEGENERACY` — see the block
+#: comment at the top of this section. Not atomic data (doc 00 C1).
+_SECOND_RADIATING_DEGENERACY: Final[int] = 3
+
+#: Shaped, same order as `_LINE_A_UL_PER_S`. The emitted intensity is `n_q A_ul`, and `n_q`
+#: is itself ~`source / A_ul` because radiative decay is this level's only significant loss,
+#: so the line's brightness is set by the excitation rate and is nearly independent of this
+#: number — it is not a knob the line ratio can be tuned with.
+_SECOND_LINE_A_UL_PER_S: Final[float] = 1.0e7
 
 _ENERGY_GRID_MAX_EV: Final[float] = 60.0
 _ENERGY_GRID_CELLS: Final[int] = 600
@@ -290,6 +391,29 @@ _XSEC_GROUND_TO_METASTABLE_PEAK_M2: Final[float] = 3.0e-21
 _XSEC_GROUND_TO_RADIATING_PEAK_M2: Final[float] = 1.0e-21
 _XSEC_METASTABLE_TO_RADIATING_PEAK_M2: Final[float] = 5.0e-20
 _RADIATING_THRESHOLD_FROM_METASTABLE_EV: Final[float] = _RADIATING_ENERGY_EV - _METASTABLE_ENERGY_EV
+
+#: The ground -> second-radiating channel, the only one feeding that level. Larger than
+#: `_XSEC_GROUND_TO_RADIATING_PEAK_M2` because it is the *sole* supply of a level whose
+#: threshold sits 1.5 eV further out in the tail, and the second line has to clear the
+#: detector's noise floor to be an observation at all rather than a decorative feature of
+#: the spectrum. Shaped, like the three peaks above it — and note it cannot manufacture the
+#: line ratio's temperature dependence, which comes from the threshold in the exponent and
+#: not from a prefactor that divides out of `d(ln ratio)/d(T_e)` entirely.
+#:
+#: **Measured sensitivity, recorded because it is a real caveat and not a tidy one.** This
+#: value was fixed before the ratio was measured, and the sweep run afterwards says: at
+#: 1e-20 the ratio is monotonic in `T_e` and moves +10.9 % over 2 -> 6 eV; raising it to
+#: 2e-20 / 5e-20 keeps monotonicity and *improves* the movement to +15 % / +18 %; lowering
+#: it to 6e-21 and below the ratio turns **non-monotonic**, with a minimum near
+#: `T_e` = 4 eV. The mechanism is the `q -> p` cascade: it is a term the two lines share, so
+#: it linearises an otherwise non-monotonic contrast. Two consequences worth stating
+#: plainly rather than leaving to be rediscovered — the monotonicity
+#: `test_line_ratio.py::test_the_ratio_is_monotonic_across_the_prior_range` checks is a
+#: property of this *configuration*, not of a two-line spectrum in general; and the value
+#: here is a lower bound of the well-behaved regime, kept at its pre-registered setting
+#: rather than raised after the fact, which would have been tuning a cross section to a
+#: result.
+_XSEC_GROUND_TO_SECOND_RADIATING_PEAK_M2: Final[float] = 1.0e-20
 
 
 def _threshold_cross_section(
@@ -311,7 +435,26 @@ def _threshold_cross_section(
 
 
 def _reference_level_system(grid: EnergyGrid) -> LevelSystem:
-    """Ground, metastable and radiating levels, one emission line — see the module docstring."""
+    """Four levels and **two** emission lines — see the module docstring and the "second
+    emission line" comment block above for why the second one exists.
+
+    The two radiating levels differ in *how they are fed*, which is the whole mechanism:
+
+    * `_RADIATING` (811.53 nm) is supplied mostly through the metastable, a 1.6 eV
+      threshold that the *bulk* of the electron distribution clears;
+    * `_SECOND_RADIATING` (`SECOND_LINE_WAVELENGTH_NM`) is supplied only from the ground
+      state across a ~14.6 eV threshold that only the distribution's *tail* clears, and is
+      deliberately given no metastable channel.
+
+    So the two lines respond to `T_e` differently and their ratio tracks it, mirroring doc
+    02 §6.3's 750.4 nm (direct) against 811.53 nm (metastable-fed) pair — which this
+    spectrograph cannot record in one frame, hence the shaped substitute.
+
+    The second line's `q -> p` decay is a genuine radiative cascade into the first line's
+    upper level, which the CR model (`vpl.instruments.oes.cr`) already assembles; it is left
+    in rather than suppressed because suppressing it would be a fiction, and it is small —
+    `n_q` is the tail-fed level, orders below `n_p`.
+    """
 
     def channel(
         *, lower: str, upper: str, threshold_ev: float, peak_m2: float
@@ -338,6 +481,11 @@ def _reference_level_system(grid: EnergyGrid) -> LevelSystem:
             Level(
                 label=_RADIATING, energy_ev=_RADIATING_ENERGY_EV, degeneracy=_RADIATING_DEGENERACY
             ),
+            Level(
+                label=_SECOND_RADIATING,
+                energy_ev=_SECOND_RADIATING_ENERGY_EV,
+                degeneracy=_SECOND_RADIATING_DEGENERACY,
+            ),
         ),
         electron_impact=(
             channel(
@@ -358,6 +506,15 @@ def _reference_level_system(grid: EnergyGrid) -> LevelSystem:
                 threshold_ev=_RADIATING_THRESHOLD_FROM_METASTABLE_EV,
                 peak_m2=_XSEC_METASTABLE_TO_RADIATING_PEAK_M2,
             ),
+            # Ground-fed only, and no metastable partner: that omission is the physics, not
+            # an oversight. A metastable channel here would put both lines on the same
+            # low-threshold supply and flatten their ratio.
+            channel(
+                lower=_GROUND,
+                upper=_SECOND_RADIATING,
+                threshold_ev=_SECOND_RADIATING_ENERGY_EV,
+                peak_m2=_XSEC_GROUND_TO_SECOND_RADIATING_PEAK_M2,
+            ),
         ),
         radiative=(
             RadiativeChannel(
@@ -365,6 +522,12 @@ def _reference_level_system(grid: EnergyGrid) -> LevelSystem:
                 lower=_METASTABLE,
                 a_ul_per_s=_LINE_A_UL_PER_S,
                 wavelength_nm=_LINE_WAVELENGTH_NM,
+            ),
+            RadiativeChannel(
+                upper=_SECOND_RADIATING,
+                lower=_RADIATING,
+                a_ul_per_s=_SECOND_LINE_A_UL_PER_S,
+                wavelength_nm=SECOND_LINE_WAVELENGTH_NM,
             ),
         ),
     )

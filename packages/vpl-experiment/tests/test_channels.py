@@ -288,19 +288,27 @@ class TestWhatLifAddsThatOesCannotSee:
         assert at_truth - hotter > 100.0
         assert at_truth - colder > 100.0
 
-    def test_lif_constrains_the_degeneracy_direction_at_least_as_hard_as_oes(
+    def test_both_channels_constrain_the_degeneracy_direction(
         self, channels: ChannelSet, truth_state: PlasmaState
     ) -> None:
-        # ``T_i`` proves LIF sees *something* OES cannot, but the parameter combination the
-        # project is actually stuck on is ``Gamma_i ~ n_0 sqrt(T_e)``. This walks along
-        # that curve — ``n_0 -> k n_0``, ``T_e -> T_e / k^2``, which leaves the product
-        # exactly fixed — and asks each channel how much it minds.
+        # ``T_i`` proves LIF sees *something* OES cannot. The combination the project is
+        # actually stuck on, though, is ``Gamma_i ~ n_0 sqrt(T_e)``. This walks along that
+        # curve — ``n_0 -> k n_0``, ``T_e -> T_e / k^2``, which leaves the product exactly
+        # fixed — and asks each channel how much it minds.
         #
-        # LIF minds more, and for a reason worth stating: at the sheath edge its line
-        # centre sits at the Bohm speed, which is ``sqrt(T_e / M)`` with no ``n_0`` in it
-        # at all, while its amplitude carries ``n_0`` with no ``T_e``. OES forms neither
-        # separately — it sees an emission rate that mixes both. Observed: LIF -5.3e3
-        # against OES -2.4e3 for k = 1.05.
+        # THIS TEST USED TO ASSERT ``lif_penalty > oes_penalty``, AND THAT IS NOW FALSE.
+        # The reason is a result rather than a regression: adding a second emission line
+        # took OES's penalty along this ridge from 2.445e3 to 2.287e4, a factor of 9.35,
+        # and it now exceeds LIF's unchanged 5.257e3. The old ranking held only while OES
+        # observed a single line, where the ridge was visible to it just as an overall
+        # brightness change. Two lines make it a *shape* change, which is a far stronger
+        # signal — and shape is also what survives a calibration error, which is the whole
+        # reason the second line was added.
+        #
+        # So the assertion is now the one that is actually load-bearing: both channels
+        # constrain the ridge substantially. LIF's unique contribution does not rest on
+        # winning this comparison — it rests on the ion temperature being bit-for-bit
+        # invisible to OES, which the test above pins directly.
         theta = _operating_theta()
         observations = channels.observe(truth_state)
         joint = channels.joint(observations)
@@ -312,8 +320,9 @@ class TestWhatLifAddsThatOesCannotSee:
         oes_penalty = oes.log_prob(_state(theta)) - oes.log_prob(along_ridge)
         lif_penalty = lif.log_prob(_state(theta)) - lif.log_prob(along_ridge)
 
-        assert oes_penalty > 0.0
-        assert lif_penalty > oes_penalty
+        # 100 log units is 200 in chi-squared — far beyond anything noise could produce.
+        assert oes_penalty > 100.0
+        assert lif_penalty > 100.0
 
 
 class TestTheTuningRange:
