@@ -504,3 +504,79 @@ class TestTheDetectionGate:
             kappa=1.0,
         )
         assert not _configured().is_informative(sparse)
+
+
+class TestTheBiasFindingIsRobustButItsMagnitudeIsNot:
+    """What doc 11 §9 item 7's comparative figure may and may not claim.
+
+    The probe's non-Maxwellian ``T_e`` bias is about to be used as the baseline this
+    project is measured against. Before that number is quoted anywhere, it is worth knowing
+    which part of it is physics and which part is an analysis choice — because the log-slope
+    fit window is a genuinely free choice a real experimentalist makes, and if the headline
+    bias moves with it, quoting a single value overstates our own advantage.
+
+    Measured across seven defensible windows: the Druyvesteyn error exceeds the Maxwellian
+    error in every one, by a factor of 2.0 to 4.7 — so the *finding* is robust. But its
+    magnitude ranges from 4.0 % to 24.4 %, a factor of six. **The comparative figure must
+    therefore report a range over analysis choices, not the single number the default window
+    happens to give.** Quoting 16.7 % as "the" probe error would be choosing the baseline
+    that flatters us.
+    """
+
+    @staticmethod
+    def _error(kappa: float, window: tuple[float, float]) -> float:
+        import vpl.instruments.probe.langmuir.analysis as analysis
+
+        lower, upper = analysis._FIT_WINDOW_LOWER_FRACTION, analysis._FIT_WINDOW_UPPER_FRACTION
+        analysis._FIT_WINDOW_LOWER_FRACTION, analysis._FIT_WINDOW_UPPER_FRACTION = window
+        try:
+            voltages = np.linspace(_TRUE_VP - 40.0, _TRUE_VP + 20.0, 201)
+            current = probe_current_a(
+                voltages,
+                plasma_potential_v=_TRUE_VP,
+                electron_density_m3=_TRUE_N_E,
+                electron_temperature_ev=_TRUE_T_E,
+                ion_mass_kg=_argon().mass_kg,
+                geometry=_geometry(),
+                kappa=kappa,
+            )
+            estimate = estimate_from_iv_curve(
+                voltages,
+                current,
+                ion_mass_kg=_argon().mass_kg,
+                probe_area_m2=_geometry().area_m2,
+            )
+            return abs(estimate.electron_temperature_ev - _TRUE_T_E) / _TRUE_T_E
+        finally:
+            analysis._FIT_WINDOW_LOWER_FRACTION = lower
+            analysis._FIT_WINDOW_UPPER_FRACTION = upper
+
+    _WINDOWS = (
+        (0.05, 0.4),
+        (0.1, 0.4),
+        (0.2, 0.4),
+        (0.3, 0.5),
+        (0.2, 0.6),
+        (0.25, 0.45),
+        (0.4, 0.7),
+    )
+
+    @pytest.mark.physics
+    def test_the_druyvesteyn_bias_exceeds_the_maxwellian_one_in_every_window(self) -> None:
+        # The defensible claim, and the only one the comparative figure may make
+        # unqualified.
+        for window in self._WINDOWS:
+            maxwellian = self._error(MAXWELLIAN_KAPPA, window)
+            druyvesteyn = self._error(DRUYVESTEYN_KAPPA, window)
+            assert druyvesteyn > maxwellian, f"window {window} does not show the bias"
+
+    @pytest.mark.physics
+    def test_the_magnitude_swings_by_several_fold_across_defensible_windows(self) -> None:
+        # Deliberately asserts that the number is NOT stable, so that anyone tempted to
+        # quote a single probe error has to come here and read why they must not.
+        errors = [self._error(DRUYVESTEYN_KAPPA, window) for window in self._WINDOWS]
+
+        assert max(errors) / min(errors) > 3.0, (
+            "if the magnitude has become stable, this guard is obsolete and the comparative "
+            "figure may quote a single number — verify that before deleting this test"
+        )
