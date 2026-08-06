@@ -23,6 +23,13 @@ dependencies = [
     # The only solver that exists (doc 11 §2 WBS 1.5). `vpl run` has to be able to
     # actually run something, or the manifest engine is untested prose.
     "vpl-physics",
+    # doc 08 §3: this is the *only* package permitted to import both vpl-physics and
+    # vpl-inverse. `vpl.experiment.closed_loop` (doc 11 §9 item 4, WBS 3.9) is exactly
+    # that seam — it wires an L0 forward solve and an OES instrument model to the MAP
+    # engine and the sealed-truth barrier, none of which may import each other directly.
+    "vpl-instruments",
+    "vpl-inverse",
+    "vpl-validation",
     # doc 08 §2, "Configuration | Buy". See ADR-008 for why OmegaConf and not yet Hydra.
     "omegaconf>=2.3",
     # The run record of doc 13 §2 is YAML, as is the archived manifest (doc 08 §7).
