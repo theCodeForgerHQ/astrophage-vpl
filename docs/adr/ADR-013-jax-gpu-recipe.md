@@ -133,3 +133,58 @@ Extrapolating from what was actually measured here: **914 days for DS-TRAIN on t
 machine and a configuration, every schedule resting on it is unsound, and gate G-1.4's
 requirement to replace the doc 10 §3.2 estimate with a measurement is only half satisfied —
 the measurement now exists, and it disagrees with the number in use.
+
+---
+
+## Addendum 2: the bottleneck was never the device — and the CPU wins
+
+A throwaway probe (not committed) reimplemented the inner PIC step — CIC deposit, Thomas
+Poisson, CIC gather, leapfrog push, two species — in three variants, timed on both devices
+in `jaxcu11py311`. The in-domain assertion was replaced by a **traceable** clamp plus a
+deferred violation counter, so the guard's safety is preserved and merely checked after the
+loop rather than during it. All three variants agree to 1e-17–1e-20, and the violation
+counter was zero in every run.
+
+particle-steps/s (`2 x n_ppc x n_cells x n_steps`):
+
+| variant | device | 27 200p / 34c / 400 steps | 2 000 000p / 1000c / 100 steps |
+|---|---|---|---|
+| 1 — eager (today's solver) | GPU | 1.460e6 | 3.547e7 |
+| 1 — eager | CPU | 5.349e6 | 3.356e7 |
+| 2 — whole step jitted | GPU | 1.477e7 | 4.415e7 |
+| 2 — whole step jitted | CPU | 1.549e8 | 8.402e7 |
+| 3 — `lax.scan` over all steps | GPU | 1.412e9 | 8.785e8 |
+| 3 — `lax.scan` over all steps | **CPU** | **9.859e9** | **1.837e9** |
+
+**The CPU beats the GPU in every variant at both sizes, including the fully-compiled
+ceiling** — 2.09x at production scale, 7x at the small size. Every previous conclusion in
+this ADR about "getting JAX onto the GPU" was solving the wrong problem.
+
+**The gain is the refactor, not the device.** On CPU alone, `lax.scan` is **54.7x** faster
+than today's eager loop at production scale. Projected from the measured CPU scan rate:
+
+| configuration | RP-1 solve | DS-TRAIN (5 000 runs) |
+|---|---|---|
+| today, eager, CPU | 3 921 s | **226.9 days** |
+| refactored, `lax.scan`, CPU | **71.6 s** | **4.1 days** |
+| refactored, `lax.scan`, GPU | 149.8 s | 8.7 days |
+
+**DS-TRAIN goes from infeasible to a long weekend, on hardware already in hand, with no GPU
+involved.** doc 11 WBS 3.1 — and with it L3, NUTS and the doc 11 §5 envelope sweeps — is
+blocked by a *code structure*, not by compute.
+
+### What this measurement does not say
+
+The probe omits collisions/MCC, boundary absorption, injection, secondary emission and the
+diagnostic bookkeeping — all of which are real work in the production kernel and none of
+which trivially fit inside a `scan`. **54.7x is a ceiling, not a promise**; the achievable
+figure will be lower, and boundary handling with its fixed-capacity parking scheme is the
+part most likely to resist. Even a fifth of it, however, puts DS-TRAIN inside three weeks.
+
+### Consequence for the roadmap
+
+The GPU work recorded above remains correct and was worth doing — it produced a working
+environment, a reproducible recipe, and the measurement that showed the device was never the
+constraint. But **the project should stop planning around a GPU**. The actionable item is to
+make the PIC step traceable (`jax.experimental.checkify`, or the clamp-and-count pattern
+this probe validated) so the time loop fits one `lax.scan`, and then run DS-TRAIN on CPU.
