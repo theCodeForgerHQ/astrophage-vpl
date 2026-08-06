@@ -296,6 +296,8 @@ class CellReport:
     #: Thomson is excluded at RP-1 (see `_DISCREPANCY_INELIGIBLE_CHANNELS`) — a row that
     #: reported only a boolean would hide that a quarter of the correction is missing.
     discrepancy_channels: tuple[str, ...] = ()
+    #: The channel dropped from the likelihood, or ``None`` for the full set.
+    ablated: str | None = None
 
     @property
     def label(self) -> str:
@@ -532,6 +534,7 @@ def run_cell(
     seed: int = 0,
     l2_truth_path: Path | str | None = None,
     discrepancy_path: Path | str | None = None,
+    ablate: str | None = None,
     registry: ParameterRegistry | None = None,
     credible_level: float = CREDIBLE_LEVEL,
     verbose: bool = False,
@@ -546,6 +549,15 @@ def run_cell(
         l2_truth_path: Required when ``cell.truth`` is ``L2``; ignored otherwise.
         discrepancy_path: Required when ``cell.model_discrepancy`` is set; ignored
             otherwise. See :func:`_resolve_discrepancy`.
+        ablate: Drop one channel by name from the joint likelihood — doc 11 §9 item 6's
+            "drop each channel, show the CI inflate". The truth and its measurements are
+            **unchanged**: exactly the same sealed state, the same synthetic data, the same
+            seed. Only the set of terms summed over moves, which is what makes the
+            difference between two rows attributable to the channel rather than to the
+            draw. An unknown name raises (``KeyError`` from
+            :meth:`~vpl.inverse.fusion.JointLikelihood.without`), because a typo would
+            ablate nothing and produce two identical rows that read as "this channel
+            carries no information" — the exact opposite of the truth.
         credible_level: Central mass of the reported interval.
 
     Raises:
@@ -600,6 +612,8 @@ def run_cell(
         discrepancy=discrepancy,
     )
     joint: JointLikelihood = channel_set.joint(channel_set.observe(truth_state))
+    if ablate is not None:
+        joint = joint.without(ablate)
 
     # ── step 3: seal the truth ────────────────────────────────────────────────
     sealed = SealedTruth(value=gamma_e_true, name="Gamma_E")
@@ -679,6 +693,7 @@ def run_cell(
         wall_clock_s=time.perf_counter() - started,
         posterior=posterior,
         discrepancy_channels=corrected_channels,
+        ablated=ablate,
     )
 
 
