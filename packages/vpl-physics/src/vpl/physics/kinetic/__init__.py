@@ -16,15 +16,33 @@ from vpl.physics.kinetic.precision import enable_double_precision, is_double_pre
 # see precision.py for why that is a correctness statement rather than a preference.
 enable_double_precision()
 
-from vpl.physics.kinetic.fields import (  # noqa: E402  — must follow the x64 switch
+from vpl.physics.kinetic.boundary import (  # noqa: E402  — must follow the x64 switch
+    InjectionSource,
+    SurfaceModel,
+    WallModel,
+)
+from vpl.physics.kinetic.fields import (  # noqa: E402
     deposit_cic,
     gather_cic,
     solve_poisson_dirichlet,
 )
 from vpl.physics.kinetic.grid import UniformGrid  # noqa: E402
+from vpl.physics.kinetic.solver import (  # noqa: E402
+    IonEnergyDistribution,
+    Pic1D3VSolver,
+    PicDiagnostics,
+    PicRun,
+)
 
 __all__ = [
+    "InjectionSource",
+    "IonEnergyDistribution",
+    "Pic1D3VSolver",
+    "PicDiagnostics",
+    "PicRun",
+    "SurfaceModel",
     "UniformGrid",
+    "WallModel",
     "deposit_cic",
     "enable_double_precision",
     "gather_cic",

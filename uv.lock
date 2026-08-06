@@ -7,6 +7,8 @@ members = [
     "astrophage-vpl-workspace",
     "vpl-core",
     "vpl-experiment",
+    "vpl-instruments",
+    "vpl-inverse",
     "vpl-physics",
     "vpl-validation",
 ]
@@ -585,7 +587,10 @@ dependencies = [
     { name = "omegaconf" },
     { name = "pyyaml" },
     { name = "vpl-core", extra = ["storage"] },
+    { name = "vpl-instruments" },
+    { name = "vpl-inverse" },
     { name = "vpl-physics" },
+    { name = "vpl-validation" },
 ]
 
 [package.metadata]
@@ -593,7 +598,46 @@ requires-dist = [
     { name = "omegaconf", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "vpl-core", extras = ["storage"], editable = "packages/vpl-core" },
+    { name = "vpl-instruments", editable = "packages/vpl-instruments" },
+    { name = "vpl-inverse", editable = "packages/vpl-inverse" },
     { name = "vpl-physics", editable = "packages/vpl-physics" },
+    { name = "vpl-validation", editable = "packages/vpl-validation" },
+]
+
+[[package]]
+name = "vpl-instruments"
+version = "0.1.0"
+source = { editable = "packages/vpl-instruments" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "vpl-core" },
+    { name = "vpl-physics" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "scipy", specifier = ">=1.14" },
+    { name = "vpl-core", editable = "packages/vpl-core" },
+    { name = "vpl-physics", editable = "packages/vpl-physics" },
+]
+
+[[package]]
+name = "vpl-inverse"
+version = "0.1.0"
+source = { editable = "packages/vpl-inverse" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "vpl-core" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "scipy", specifier = ">=1.14" },
+    { name = "vpl-core", editable = "packages/vpl-core" },
 ]
 
 [[package]]
@@ -626,6 +670,7 @@ version = "0.1.0"
 source = { editable = "packages/vpl-validation" }
 dependencies = [
     { name = "numpy" },
+    { name = "pyyaml" },
     { name = "scipy" },
     { name = "sympy" },
     { name = "vpl-core" },
@@ -634,6 +679,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=2.1" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "scipy", specifier = ">=1.14" },
     { name = "sympy", specifier = ">=1.13" },
     { name = "vpl-core", editable = "packages/vpl-core" },
