@@ -188,3 +188,68 @@ environment, a reproducible recipe, and the measurement that showed the device w
 constraint. But **the project should stop planning around a GPU**. The actionable item is to
 make the PIC step traceable (`jax.experimental.checkify`, or the clamp-and-count pattern
 this probe validated) so the time loop fits one `lax.scan`, and then run DS-TRAIN on CPU.
+
+---
+
+## Addendum 3: batched, the GPU wins by 17.8x — addendum 2's conclusion is withdrawn
+
+Addendum 2 concluded "the project should stop planning around a GPU". **That was wrong, and
+it was wrong because it measured the wrong unit of work.** A single PIC run is a poor fit for
+this device — serial Thomas Poisson sweep, FP64 on a card with a 93x FP64 penalty,
+scatter/gather traffic. But doc 11 WBS 3.1 does not need one fast run. It needs **5 000
+independent runs**, and independent runs are exactly what a GPU is for.
+
+`vmap` over an ensemble axis, then `lax.scan` the vmapped step. Per-member size 27 200
+particles / 34 cells / 400 steps; aggregate particle-steps/s across the whole batch:
+
+| batch | GPU | CPU |
+|---|---|---|
+| 1 | 1.231e9 | 7.987e9 |
+| 8 | 9.900e9 | 6.117e9 |
+| 64 | 4.422e10 | 5.706e9 |
+| 256 | 6.749e10 | 5.671e9 |
+| 1024 | 8.980e10 | 5.473e9 |
+| 3072 | **9.438e10** | 5.289e9 |
+| 3584 | OOM (`RESOURCE_EXHAUSTED`) | — |
+
+**GPU throughput rises 77x with batch size; CPU is flat and slightly declining.** That
+asymmetry is the whole finding: the CPU has no idle lanes to fill, and the GPU has thousands.
+At batch 3072 the GPU beats the CPU by **17.8x**, and beats the CPU's own best point
+(batch 1) by 11.8x. Correctness holds — a batch of 8 identical members reproduces the
+single-run result to 4.5e-14 on GPU and exactly on CPU.
+
+The fixed-capacity particle-parking scheme in `vpl.physics.kinetic.boundary` is what makes
+this possible. It was adopted so absorbed particles never change array shapes and jitted
+kernels never retrace; that same property is precisely what `vmap` requires. A design choice
+made for one reason turns out to be the enabling condition for another.
+
+### The probe's own extrapolation is wrong by four orders of magnitude — corrected here
+
+The probe reported DS-TRAIN at "0.6-0.7 s". That used its **verification-scale member**
+(1.088e7 particle-steps) as the DS-TRAIN unit. A production RP-1 solve is 1.316e11
+particle-steps — **12 096x larger**. So DS-TRAIN is 6.58e14 particle-steps, not 5.44e10.
+
+Memory also binds harder at production scale. OOM occurs around 8.4e7 particles in flight;
+a production member is 2e6 particles, so the achievable batch is **~42**, not 3072 — landing
+in the batch-64 row rather than the best row.
+
+| basis | DS-TRAIN (5 000 production runs) |
+|---|---|
+| today, eager, CPU | **227 days** |
+| refactored `lax.scan`, CPU | **4.1 days** |
+| refactored + `vmap`, GPU, batch ~64 | **~4.1 hours** |
+| refactored + `vmap`, GPU, best rate (not reachable at production size) | 1.9 hours |
+
+**~4 hours, on the card already in hand.** Still a ~1 300x improvement over today and a ~24x
+improvement over the CPU-refactored path — the conclusion stands, only the magnitude changes.
+
+### Consequence
+
+The actionable item is unchanged and now more valuable: make the PIC step traceable (clamp
+plus deferred violation counter, validated in addendum 2's probe) so the time loop fits one
+`lax.scan` — and then **`vmap` over the ensemble and run DS-TRAIN on the GPU**. The refactor
+alone buys 227 days -> 4.1 days on CPU; batching on top buys 4.1 days -> ~4 hours.
+
+Caveat carried from addendum 2 and still binding: both probes omit collisions, boundary
+absorption, injection, secondary emission and diagnostics. These are ceilings, not promises,
+and the boundary handling is the part most likely to resist batching.
