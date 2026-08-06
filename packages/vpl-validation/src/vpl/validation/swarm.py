@@ -155,6 +155,18 @@ def _reid_elastic(energy_ev: FloatArray) -> FloatArray:
     return np.full_like(np.asarray(energy_ev, dtype=np.float64), 6.0 * _ANGSTROM_SQUARED)
 
 
+#: Reid ramp threshold energy, Reid (1979) eq. (23). Below it the cross-section is exactly
+#: zero — this is the model gas's *definition*, not a physical measurement, which is why it
+#: lives here as a named literature constant rather than in the parameter registry.
+_REID_THRESHOLD_EV: Final[float] = 0.2
+
+#: Lucas-Saelee ionisation slope in A^2/eV, Flynn eq. (28b).
+_LUCAS_SAELEE_IONISATION_SLOPE: Final[float] = 0.1
+
+#: Lucas-Saelee ionisation threshold energy, Flynn eq. (28b).
+_LUCAS_SAELEE_THRESHOLD_EV: Final[float] = 15.6
+
+
 def _reid_ramp(energy_ev: FloatArray) -> FloatArray:
     """Reid eq. (23): zero below 0.2 eV, then ``k (eps - eps_i)`` with ``k = 10 A^2/eV``.
 
@@ -162,7 +174,7 @@ def _reid_ramp(energy_ev: FloatArray) -> FloatArray:
     the entire physical content of the gas.
     """
     energy = np.asarray(energy_ev, dtype=np.float64)
-    return 10.0 * _ANGSTROM_SQUARED * np.clip(energy - 0.2, 0.0, None)
+    return 10.0 * _ANGSTROM_SQUARED * np.clip(energy - _REID_THRESHOLD_EV, 0.0, None)
 
 
 def _lucas_saelee_elastic(energy_ev: FloatArray) -> FloatArray:
@@ -174,7 +186,11 @@ def _lucas_saelee_elastic(energy_ev: FloatArray) -> FloatArray:
 def _lucas_saelee_ionisation(energy_ev: FloatArray) -> FloatArray:
     """Flynn eq. (28b): ``sigma_iz = 0.1 (eps - 15.6) A^2`` above threshold."""
     energy = np.asarray(energy_ev, dtype=np.float64)
-    return 0.1 * _ANGSTROM_SQUARED * np.clip(energy - 15.6, 0.0, None)
+    return (
+        _LUCAS_SAELEE_IONISATION_SLOPE
+        * _ANGSTROM_SQUARED
+        * np.clip(energy - _LUCAS_SAELEE_THRESHOLD_EV, 0.0, None)
+    )
 
 
 REID_RAMP: Final[ModelGas] = ModelGas(

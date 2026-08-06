@@ -124,7 +124,7 @@ disallow_any_generics = true
 # Every package's source root. `vpl` is an implicit namespace package, so a path
 # missing here makes mypy resolve the same file under two module names and report
 # phantom duplicate-definition errors. Append a package here when you add one.
-mypy_path = "packages/vpl-core/src:packages/vpl-physics/src:packages/vpl-instruments/src:packages/vpl-experiment/src:packages/vpl-inverse/src"
+mypy_path = "packages/vpl-core/src:packages/vpl-physics/src:packages/vpl-instruments/src:packages/vpl-experiment/src:packages/vpl-inverse/src:packages/vpl-validation/src"
 namespace_packages = true
 explicit_package_bases = true
 

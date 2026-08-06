@@ -52,17 +52,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from vpl.core.params import default_registry
 from vpl.experiment.closed_loop import (
-    _argon_ion,
-    _oes_instrument,
+    SECOND_LINE_WAVELENGTH_NM,
     _acquisition_window,
+    _argon_ion,
     _fixed_spatial_grid,
     _maxwellian_eedf_factory,
+    _oes_instrument,
     _reference_theta,
     _to_plasma_params,
-    SECOND_LINE_WAVELENGTH_NM,
 )
-from vpl.core.params import default_registry
 from vpl.physics.analytic.sheath import AnalyticSheathSolver
 
 
