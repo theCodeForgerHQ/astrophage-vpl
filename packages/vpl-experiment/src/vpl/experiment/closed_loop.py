@@ -1,11 +1,16 @@
 """The closed-loop recovery harness — doc 05 §7, doc 07 §3, doc 11 §9 item 4 / WBS 3.9.
 
-theta -> L0 forward -> PlasmaState -> OES forward model -> synthetic observation ->
-likelihood -> MAP -> theta_hat -> Gamma_E(theta_hat) -> :class:`~vpl.validation.sealed.
-SealedTruth` -> tier-labelled report. This module is the one place in the project allowed
-to import both :mod:`vpl.physics` and :mod:`vpl.inverse` (doc 08 §3): the inverse layer
-stays ignorant of any forward model, and the seam that wires a concrete one to it lives
-here rather than being smuggled into either package.
+theta -> truth-generating forward model -> PlasmaState -> OES forward model -> synthetic
+observation -> likelihood -> MAP (always against L0) -> theta_hat -> Gamma_E(theta_hat) ->
+:class:`~vpl.validation.sealed.SealedTruth` -> tier-labelled report. This module is the one
+place in the project allowed to import both :mod:`vpl.physics` and :mod:`vpl.inverse` (doc
+08 §3): the inverse layer stays ignorant of any forward model, and the seam that wires a
+concrete one to it lives here rather than being smuggled into either package.
+
+The truth-generating model is L0 (:class:`~vpl.physics.analytic.sheath.
+AnalyticSheathSolver`) for T0 and T1, and L1 (:class:`~vpl.physics.fluid.sheath.
+FluidSheathSolver`) for T2 — see :func:`_run`'s ``truth_solver`` parameter and the "T2"
+section below. The inversion is L0 at every tier, without exception.
 
 ## What a T0 pass here proves, and what it does not
 
@@ -96,24 +101,117 @@ is synthetic here is the atomic data, not the optics or the statistics, and the 
 doc 00 C2: fitting a real LXCat cross-section set to a CR model that reproduces a printed
 line ratio is its own piece of work, already scoped elsewhere, and reusing the package's own
 "not argon" verification convention is more honest than inventing a second one.
+
+## T2 — doc 05 §7.1's mismatch axes, and which of them this module actually exercises
+
+`run_t0` and `run_t1` are two configurations of `_run`; `run_t2` (doc 11 §9 item 4) is a
+third, and the point of the `_run` refactor that added it is that all three walk the same
+code path rather than three that could quietly drift apart. doc 05 §7.1 requires physics
+level, grid, timestep, collision set, EEDF form *and* calibration to differ between the
+truth and the inversion, together. Taking them in order:
+
+1. **Physics level — the primary mismatch, and genuinely exercised.** The inversion is
+   always :class:`~vpl.physics.analytic.sheath.AnalyticSheathSolver` (L0); T2's truth is
+   :class:`~vpl.physics.fluid.sheath.FluidSheathSolver` (L1) — inertial drift-diffusion
+   ions and a coupled Newton solve, against L0's collisionless Child-Langmuir closed form.
+2. **Grid — genuinely exercised, and the reason `_generate_truth` and
+   `_resample_onto_grid` exist.** L1 is solved on **its own** mesh
+   (`FluidSheathSolver.grid`), sized the way its Newton solve actually needs — never on
+   the fixed observation grid `_fixed_spatial_grid` builds once before the search starts.
+   Passing that fixed grid into `FluidSheathSolver.solve` would silently under- or
+   over-resolve the sheath depending on what the *truth* `theta` happened to be, which is
+   exactly the theta-dependent-grid inverse crime the module docstring above describes,
+   just moved from L0's `default_grid` into L1's mesh generator. So L1 is always solved
+   unconstrained, and the resulting state is resampled — linear interpolation, `_resample_
+   onto_grid` — onto the fixed grid *afterward*, for the instrument to observe. The mesh a
+   solver needed to converge and the array an instrument reports through are different
+   things at every tier now, not just conveniently the same array at T0/T1.
+3. **Collision set — inherent in the level mismatch, nothing separately coded.** L1's
+   momentum equation is inertial drift-diffusion (`vpl.physics.fluid.sheath`'s own module
+   docstring); L0's Child-Langmuir closure is collisionless by construction. `run_t2` uses
+   `FluidSheathSolver`'s defaults (`mean_free_path=None`, i.e. L1's own collisionless
+   limit) rather than configuring an ion-neutral mean free path, because the axis this
+   harness measures is the *level* mismatch doc 05 §7.1 asks for, not an additional,
+   separately-swept collisionality — adding one would be a second experiment, not this one.
+4. **EEDF form — partially exercised, and this is the one worth reading carefully.** The
+   parameter registry's own `eedf.kappa` entry (`packages/vpl-core/src/vpl/core/params/
+   data/inverse-priors.yaml`) states plainly that the kappa-parameterised family
+   (:func:`~vpl.physics.eedf.analytic.generalised_eedf`, `kappa=1` Maxwellian, `kappa=2`
+   Druyvesteyn) is the **inversion's** side of this mismatch, and that a real T2 truth
+   should be "the EEDF the PIC run actually produces, which is not of this form" — ideally
+   a genuinely solved distribution such as
+   :class:`~vpl.physics.eedf.solver.TwoTermSolver`'s. Building and wiring the electron
+   kinetics (cross sections, an `ElectronKinetics` set for this harness's synthetic level
+   system) that a `TwoTermSolver` truth needs was judged too large a change for the time
+   available on this task, and is flagged here as follow-up work rather than attempted
+   and gotten subtly wrong. What is implemented instead: the truth's EEDF is
+   `_GeneralisedEedf(kappa=DRUYVESTEYN_KAPPA)` — `generalised_eedf`'s own `kappa=2` member,
+   which doc 03 §3.2 names directly as the real argon EEDF's shape ("Druyvesteyn-like with
+   a depleted tail") — while the inversion keeps `MaxwellianEedf`, the same family's
+   degenerate `kappa=1` member. This is a **real, checkable shape mismatch** the
+   Maxwellian-only inversion cannot represent (`TestGeneralisedEedfProvider` in the test
+   suite checks the two shapes disagree at the same `T_e`), but it is a weaker exercise of
+   doc 05 §7.1's intent than an independently, non-parametrically computed truth would be:
+   both shapes still come from the *same* one-parameter analytic family, just two different
+   members of it, rather than a truth generated by a physically distinct process the
+   inversion's family cannot reach even in principle. Stated plainly rather than
+   overclaimed: this axis is partially, not fully, exercised.
+
+   `vpl.instruments.oes.instrument.KappaEedf` — the Summers & Thorne kappa-*distribution*,
+   added to that package concurrently with this work — is **not used for any of this**.
+   Its `kappa` is a different physical parameter that merely shares a symbol with
+   `PlasmaParams.kappa` (see that class's own docstring for the two families and where
+   they diverge); wiring `PlasmaParams.kappa` into it would be a category error with the
+   physics backwards, which is exactly the ADR-011 failure this module exists to avoid
+   walking into a second time.
+5. **Timestep — does not apply, and is not faked.** Both L0 and L1 as implemented here are
+   steady-state solves (`FluidSheathSolver.solve` accepts a `time_grid` but its own
+   docstring is explicit that L1 "as implemented is steady"). doc 05 §7.1's timestep axis
+   has nothing to mismatch until one of the levels in this harness is time-resolved, so
+   `run_t2` states that honestly rather than inventing a BDF2 step size neither solver
+   actually uses.
+6. **Calibration — genuinely exercised, and structurally already there.** `OesInstrument.
+   _sample`'s one code path (doc 04 §9) means `forward()` always predicts through the
+   *true* response (`scale=1.0`, hardcoded) while `observe()` applies the *estimated* one
+   (doc 04 §7.3's response, drawn once from the calibration standard's registered
+   uncertainty) whenever `use_true_calibration()` has not been called. T1 already exercises
+   this whenever `noise=True`; T2 inherits it for the same reason, made explicit via `_run`'s
+   `imperfect_calibration` parameter rather than left implicit in the noise flag alone.
+
+So of doc 05 §7.1's six named axes, four are fully exercised (physics level, grid,
+collision set, calibration), one does not apply and is stated as such (timestep), and one
+(EEDF form) is exercised only partially, honestly, and for a stated reason. `sealed.
+tier_of_configuration` still certifies the result at T2 — doc 05 §7.1's `same_model`,
+`noise` and `imperfect_calibration` booleans do not encode "how completely", only whether
+the mandatory conditions are met — but the EEDF caveat above is the qualification anyone
+reading a T2 number from this harness should carry with it.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, NoReturn
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 from numpy.typing import NDArray
 
 from vpl.core.params import ParameterRegistry, default_registry
+from vpl.core.protocols.forward import IonEnergyFlux
 from vpl.core.protocols.instrument import CalibrationReference, CalibrationSet
 from vpl.core.random import Stream, generator
-from vpl.core.state import AcquisitionWindow, PlasmaParams, SpatialGrid, Species
-from vpl.core.units import Q_, magnitude_in
+from vpl.core.state import (
+    AcquisitionWindow,
+    PlasmaParams,
+    PlasmaState,
+    ScalarField,
+    SpatialGrid,
+    Species,
+)
+from vpl.core.units import Q_, Quantity, magnitude_in
 from vpl.instruments.oes.cr import CollisionalRadiativeModel
-from vpl.instruments.oes.instrument import MaxwellianEedf, OesInstrument
+from vpl.instruments.oes.instrument import EedfProvider, MaxwellianEedf, OesInstrument
 from vpl.instruments.oes.levels import ElectronImpactChannel, Level, LevelSystem, RadiativeChannel
 from vpl.instruments.oes.spectrograph import Spectrograph
 from vpl.inverse.likelihood import gaussian_log_likelihood
@@ -121,8 +219,17 @@ from vpl.inverse.map import MapResult, maximum_a_posteriori
 from vpl.inverse.parameters import ControlParameters, LogTransform
 from vpl.inverse.priors import Prior, default_control_prior
 from vpl.physics.analytic.sheath import AnalyticSheathSolver, ion_energy_flux
+from vpl.physics.eedf.analytic import DRUYVESTEYN_KAPPA, generalised_eedf
 from vpl.physics.eedf.grid import EnergyGrid
 from vpl.validation.sealed import SealedTruth, Tier, tier_of_configuration
+
+if TYPE_CHECKING:
+    # Not imported at runtime: vpl.physics.fluid.sheath (and everything it pulls in for
+    # the FE assembly) depends on dolfinx, which is not installed in every environment
+    # this module must import cleanly in (see run_t2's own docstring). The annotations
+    # below are strings under `from __future__ import annotations`, so this import only
+    # ever runs for a type checker, never for the interpreter.
+    from vpl.physics.fluid.sheath import FluidSheathSolver
 
 __all__ = [
     "T0_RELATIVE_TOLERANCE",
@@ -333,28 +440,116 @@ def _to_plasma_params(
     )
 
 
-# ─── the OES instrument ─────────────────────────────────────────────────────────────
+# ─── the OES instrument, and the two EEDFs it can be built with ────────────────────
+#
+# doc 05 §7.1's EEDF-form mismatch — see the module docstring's account of the route
+# actually taken and the one deliberately not taken (`KappaEedf`).
+
+#: `generalised_eedf`'s own closed-form relation between its `mean_energy_ev` parameter
+#: and a Maxwellian temperature, `<eps> = (3/2) k T_e` — the same convenience conversion
+#: `MaxwellianEedf` and `KappaEedf` each make for their own families (see their module's
+#: own docstring on why an `EedfProvider` is handed a temperature at all: it is what
+#: `PlasmaState.field("T_e")` carries, whether or not the local distribution is truly
+#: Maxwellian). Duplicated here rather than imported because the source is `analytic.py`'s
+#: private `_THREE_HALVES`, and this module's own convention (see `_H_L_DEFAULT` in the
+#: test file) is that a small independently-sourced duplicate is cheaper than a new public
+#: export for one constant.
+_MEAN_ENERGY_PER_T_E: Final[float] = 1.5
 
 
-def _reference_oes_instrument(*, seed: int, registry: ParameterRegistry) -> OesInstrument:
+class _GeneralisedEedf:
+    """`generalised_eedf` (doc 05 §2.1's shape family) as an `EedfProvider`.
+
+    This is the *inversion's* side of doc 05 §7.1's EEDF mismatch, per the parameter
+    registry's own `eedf.kappa` entry: "kappa = 1 is Maxwellian and kappa = 2
+    Druyvesteyn... doc 05 §7.1 makes the kappa parameterisation the inversion side of the
+    mandatory EEDF mismatch". `MaxwellianEedf` already *is* this family's `kappa = 1`
+    member (`maxwellian_eedf` is implemented as `generalised_eedf(..., kappa=MAXWELLIAN_
+    KAPPA)`), so the inversion's existing choice needs no code change; this class exists so
+    that T2's *truth* can be built from a different, checkable member of the same family
+    (`kappa=DRUYVESTEYN_KAPPA` — see `_t2_truth_eedf_factory`) without touching `vpl-
+    instruments`, which is off-limits for this task.
+
+    Structured identically to `MaxwellianEedf`/`KappaEedf` in `vpl.instruments.oes.
+    instrument` — grid-normalised, per-temperature cached — so that swapping between all
+    three is only ever a constructor call, never a different call shape.
+
+    **Not `KappaEedf`.** `KappaEedf`'s `kappa` is the Summers & Thorne spectral index of
+    an unrelated power-law family, sharing a symbol with `PlasmaParams.kappa` and nothing
+    else (see that class's own docstring). Wiring `PlasmaParams.kappa` into it would read a
+    Druyvesteyn-shape-exponent `kappa=2` as a power-law spectral index of 2 — a wildly
+    enhanced tail where doc 03 §3.2 means a depleted one — which is a category error with
+    the physics backwards, not a rounding difference. This class is deliberately built on
+    `generalised_eedf` instead, which is the family the registry actually names.
+    """
+
+    __slots__ = ("_cache", "grid", "kappa")
+
+    def __init__(self, *, grid: EnergyGrid, kappa: float) -> None:
+        self.grid = grid
+        self.kappa = kappa
+        self._cache: dict[float, FloatArray] = {}
+
+    def f0(self, *, electron_temperature_ev: float) -> FloatArray:
+        if not electron_temperature_ev > 0.0:
+            raise ValueError(f"T_e must be positive, got {electron_temperature_ev} eV")
+        cached = self._cache.get(electron_temperature_ev)
+        if cached is None:
+            cached = self.grid.normalise(
+                generalised_eedf(
+                    self.grid.centres_ev,
+                    mean_energy_ev=_MEAN_ENERGY_PER_T_E * electron_temperature_ev,
+                    kappa=self.kappa,
+                )
+            )
+            self._cache[electron_temperature_ev] = cached
+        return cached
+
+    def __repr__(self) -> str:
+        return f"_GeneralisedEedf({self.grid!r}, kappa={self.kappa})"
+
+
+def _maxwellian_eedf_factory(grid: EnergyGrid) -> EedfProvider:
+    """The inversion's EEDF at every tier — doc 05 §7.1 asks the *truth* to differ, not the
+    inversion to know it differs (see the module docstring's "Why two parameters" section
+    on why `kappa` is fixed rather than recovered)."""
+    return MaxwellianEedf(grid=grid)
+
+
+def _t2_truth_eedf_factory(grid: EnergyGrid) -> EedfProvider:
+    """T2's truth EEDF: doc 03 §3.2's own stated real shape, not an arbitrary `kappa`.
+
+    See the module docstring's "EEDF form" section for the full account, including why
+    this is a partial rather than a complete exercise of doc 05 §7.1's EEDF axis.
+    """
+    return _GeneralisedEedf(grid=grid, kappa=DRUYVESTEYN_KAPPA)
+
+
+def _oes_instrument(
+    *, seed: int, registry: ParameterRegistry, eedf_factory: Callable[[EnergyGrid], EedfProvider]
+) -> OesInstrument:
+    """One OES instrument, uncalibrated — see the module docstring for what is and is not
+    real about the level system built here.
+
+    Uncalibrated deliberately: only the instrument used to generate the truth's measurement
+    needs `calibrate()` (`OesInstrument.observe` requires it; `.forward()` does not touch
+    calibration at all — `scale=1.0` is hardcoded in its call to `_sample`), so `_run` calls
+    it on exactly the instrument that needs it.
+    """
     grid = EnergyGrid.linear(max_ev=_ENERGY_GRID_MAX_EV, n_cells=_ENERGY_GRID_CELLS)
     model = CollisionalRadiativeModel(
         system=_reference_level_system(grid),
         grid=grid,
         wall_loss_per_s={_METASTABLE: _METASTABLE_WALL_LOSS_PER_S},
     )
-    instrument = OesInstrument(
+    return OesInstrument(
         model=model,
         spectrograph=Spectrograph.from_registry(registry),
-        # The verification fallback, not the default — see the module docstring on why
-        # `kappa` is fixed rather than recovered: this is the reason it never reaches OES.
-        eedf=MaxwellianEedf(grid=grid),
+        eedf=eedf_factory(grid),
         centre_wavelength_nm=_LINE_WAVELENGTH_NM,
         root_seed=seed,
         accumulations=_ACCUMULATIONS,
     )
-    instrument.calibrate(_calibration_set(registry))
-    return instrument
 
 
 def _calibration_set(registry: ParameterRegistry) -> CalibrationSet:
@@ -495,7 +690,9 @@ class ClosedLoopReport:
     """What one closed-loop run produced — doc 05 §10's "every inversion emits" table.
 
     Attributes:
-        tier: T0, T1 or (never produced by this module — see `run_t2`) T2.
+        tier: T0, T1 or T2, certified by `vpl.validation.sealed.tier_of_configuration`
+            rather than hand-labelled by whichever of `run_t0`/`run_t1`/`run_t2` produced
+            this report.
         gamma_e_true_w_per_m2: The sealed truth, readable because `sealed` is committed.
         gamma_e_estimate_w_per_m2: `Gamma_E(theta_hat)`.
         relative_error: `sealed.relative_error` — `|estimate/truth - 1|`.
@@ -540,40 +737,182 @@ def _t0_log_likelihood(measured: FloatArray, predicted: FloatArray) -> float:
     return gaussian_log_likelihood(measured, predicted, sigma)
 
 
-def _run(*, noise: bool, seed: int) -> ClosedLoopReport:
-    """doc 07 §3's protocol, steps 1-6, for one tier.
+def _gamma_e_at_wall(flux_result: Quantity | IonEnergyFlux) -> float:
+    """Doc 03 §6's "same functional at every level", read off whichever shape a solver's
+    own `.flux()` returns: L0's bare `Quantity` (`AnalyticSheathSolver.flux`) or L1's
+    `IonEnergyFlux` (`FluidSheathSolver.flux`). `_generate_truth` calls `truth_solver.
+    flux(state)` uniformly across both — this is what lets it not need an `isinstance`
+    check of its own for the return value, only for which state to solve on which grid.
+    """
+    if isinstance(flux_result, IonEnergyFlux):
+        return float(flux_result.energy_flux_toward_wall_watt_per_m2)
+    return float(magnitude_in(flux_result, "W/m**2"))
+
+
+def _resample_onto_grid(state: PlasmaState, grid: SpatialGrid) -> PlasmaState:
+    """A state solved on its own numerics, resampled onto the fixed observation grid.
+
+    See the module docstring's "Grid" item for why this exists at all: L1 must be solved
+    on the mesh its own Newton solve needs (`FluidSheathSolver.grid`, sized from *this
+    run's* `theta`), never on the fixed grid `_fixed_spatial_grid` builds once from the
+    *reference* thickness — passing the latter into `FluidSheathSolver.solve` would
+    silently under- or over-resolve the sheath depending on the truth `theta`, which is
+    exactly the theta-dependent-grid inverse crime this module's own construction found
+    (see the top of this file), just relocated from L0's `default_grid` into L1's mesh
+    generator. So the physics solve and the instrument's field of view are two different
+    grids at T2, joined here by linear interpolation — exact for the piecewise-linear
+    fields a converged FE solution effectively is at the resolution this harness reads it
+    at, and the same order of interpolation `_sheath_edge` in `vpl.physics.fluid.sheath`
+    already uses to locate the sheath edge between mesh nodes.
+
+    Raises:
+        ValueError: If `grid` reaches past the native solve's domain. `np.interp` would
+            silently clamp to the edge value there rather than extrapolate, which is a
+            quieter and worse version of exactly the grid-aliasing failure this function
+            exists to prevent — reporting through a place in space the physics was never
+            evaluated is not "the same physical position" any more than a theta-dependent
+            grid was.
+    """
+    if state.time is not None:
+        raise ValueError(
+            "_resample_onto_grid only handles steady states; both L0 and L1 as this "
+            "harness uses them are steady solves (see the module docstring's 'Timestep' "
+            "item), so a time-dependent state here means something upstream changed."
+        )
+    if grid.z_m[-1] > state.grid.z_m[-1]:
+        raise ValueError(
+            f"the fixed observation grid reaches z = {grid.z_m[-1]:.6e} m, past the native "
+            f"solve's domain of z = {state.grid.z_m[-1]:.6e} m. Resampling past the edge of "
+            "a converged solution would silently clamp to the boundary value instead of "
+            "reporting a physical position the solve never evaluated."
+        )
+
+    def _resampled(field: ScalarField) -> ScalarField:
+        return ScalarField(
+            name=field.name,
+            values=np.interp(grid.z_m, state.grid.z_m, field.values),
+            units=field.units,
+            grid=grid,
+            time=None,
+        )
+
+    return PlasmaState(
+        params=state.params,
+        grid=grid,
+        time=None,
+        fields={name: _resampled(field) for name, field in state.fields.items()},
+        ion_distribution=None,
+        fidelity=state.fidelity,
+    )
+
+
+def _generate_truth(
+    true_params: PlasmaParams,
+    *,
+    truth_solver: AnalyticSheathSolver | FluidSheathSolver,
+    observation_grid: SpatialGrid,
+) -> tuple[PlasmaState, float]:
+    """The sealed truth's `Gamma_E` and the state the instrument observes, from whichever
+    physics level `truth_solver` is.
+
+    `AnalyticSheathSolver` (L0, T0/T1's truth) is solved directly on `observation_grid`:
+    the analytic profile has no separate numerics of its own to converge, so "the grid it
+    needs" and "the grid the instrument sees" have always been the same array here, and
+    nothing about this refactor changes that.
+
+    Anything else — T2's `FluidSheathSolver` — is solved on its **own** mesh and then
+    resampled onto `observation_grid`; see `_resample_onto_grid` for why that two-step
+    shape, not a one-step solve on the fixed grid, is what doc 05 §7.1's grid axis and this
+    module's own inverse-crime guard both require.
+    """
+    if isinstance(truth_solver, AnalyticSheathSolver):
+        state = truth_solver.solve(true_params, grid=observation_grid)
+        return state, _gamma_e_at_wall(truth_solver.flux(state))
+
+    native_state = truth_solver.solve(true_params)
+    gamma_e = _gamma_e_at_wall(truth_solver.flux(native_state))
+    return _resample_onto_grid(native_state, observation_grid), gamma_e
+
+
+def _run(
+    *,
+    noise: bool,
+    seed: int,
+    truth_solver: AnalyticSheathSolver | FluidSheathSolver | None = None,
+    truth_eedf_factory: Callable[[EnergyGrid], EedfProvider] | None = None,
+    imperfect_calibration: bool | None = None,
+) -> ClosedLoopReport:
+    """doc 07 §3's protocol, steps 1-6, parametrised over doc 05 §7.1's mismatch axes.
+
+    `run_t0` and `run_t1` are this function with every optional argument left at its
+    default; `run_t2` (doc 11 §9 item 4) is the same path with all three supplied. See the
+    module docstring's T2 section for which axes that combination actually exercises. The
+    inversion side is **never** parametrised here — it is always `AnalyticSheathSolver`
+    with a `MaxwellianEedf`, at every tier — because doc 05 §7.1 asks the *truth* to
+    differ from the inversion, not the inversion to be told it differs.
 
     Args:
-        noise: `False` for T0 (doc 05 §7.2: same model, no noise), `True` for T1 (same
-            model, with noise). T2 is not reachable through this function — see `run_t2`.
+        noise: `False` for T0 (doc 05 §7.2: same model, no noise), `True` for T1/T2.
         seed: The single recorded seed everything in the run derives from (doc 00 E3).
+        truth_solver: What generates the sealed truth. `None` (T0/T1's default) means "the
+            same `AnalyticSheathSolver` the inversion uses" — doc 05 §7.1's same-physics-
+            level configuration. Anything else is solved on its own numerics and resampled
+            onto the fixed observation grid; see `_generate_truth`.
+        truth_eedf_factory: Builds the EEDF the truth's *measurement* is generated with,
+            from the instrument's own `EnergyGrid`. `None` (T0/T1's default) means
+            `MaxwellianEedf` — the same shape the inversion always assumes, so there is no
+            EEDF-form mismatch unless a caller supplies one (`_t2_truth_eedf_factory` for
+            T2).
+        imperfect_calibration: Whether the truth's measurement is generated through the
+            *estimated* radiometric response (doc 04 §7.3) rather than the true one. `None`
+            defaults to `noise` — T0's `use_true_calibration()` and T1's estimated response
+            are exactly the behaviour this module had before this parameter existed, so
+            leaving it implicit for T0/T1 is what keeps their numbers unchanged by this
+            refactor (see `TestRefactorPreservesT0AndT1` in the test suite).
     """
     registry = default_registry()
     species = _argon_ion(registry)
-    solver = AnalyticSheathSolver()
-    instrument = _reference_oes_instrument(seed=seed, registry=registry)
+    inversion_solver = AnalyticSheathSolver()
+    resolved_truth_solver: AnalyticSheathSolver | FluidSheathSolver = (
+        inversion_solver if truth_solver is None else truth_solver
+    )
+    resolved_truth_eedf_factory = (
+        _maxwellian_eedf_factory if truth_eedf_factory is None else truth_eedf_factory
+    )
+    resolved_imperfect_calibration = (
+        noise if imperfect_calibration is None else imperfect_calibration
+    )
+
+    truth_instrument = _oes_instrument(
+        seed=seed, registry=registry, eedf_factory=resolved_truth_eedf_factory
+    )
+    truth_instrument.calibrate(_calibration_set(registry))
+    inversion_instrument = _oes_instrument(
+        seed=seed, registry=registry, eedf_factory=_maxwellian_eedf_factory
+    )
     window = _acquisition_window(registry)
 
     reference = _reference_theta()
-    grid = _fixed_spatial_grid(solver, reference=reference, species=species, registry=registry)
+    grid = _fixed_spatial_grid(
+        inversion_solver, reference=reference, species=species, registry=registry
+    )
 
     # ── step 1: draw the ground truth ──────────────────────────────────────────
     true_theta = _draw_true_theta(seed=seed, reference=reference)
     true_params = _to_plasma_params(true_theta, species=species, registry=registry)
-    true_state = solver.solve(true_params, grid=grid)
+    true_state, truth_gamma_e = _generate_truth(
+        true_params, truth_solver=resolved_truth_solver, observation_grid=grid
+    )
 
     # ── step 2: run the forward chain -> synthetic measurement ────────────────
-    instrument.set_noise_enabled(noise)
-    if not noise:
+    truth_instrument.set_noise_enabled(noise)
+    if not resolved_imperfect_calibration:
         # doc 04 §7.3 permits the true calibration "for verification"; T0 is exactly that,
         # and CalibrationState.TRUE on the resulting Measurement records that it was used.
-        instrument.use_true_calibration()
-    measurement = instrument.observe(true_state, window)
+        truth_instrument.use_true_calibration()
+    measurement = truth_instrument.observe(true_state, window)
 
     # ── step 3: seal the truth ─────────────────────────────────────────────────
-    truth_gamma_e = float(
-        magnitude_in(ion_energy_flux(true_params, h_l=solver.h_l, gamma_i=solver.gamma_i), "W/m**2")
-    )
     sealed = SealedTruth(value=truth_gamma_e, name="Gamma_E")
 
     # ── step 4: run the inversion on the (sealed) measurement ─────────────────
@@ -582,21 +921,28 @@ def _run(*, noise: bool, seed: int) -> ClosedLoopReport:
     def log_likelihood(u: FloatArray) -> float:
         theta = _theta_from_unconstrained(u, reference=reference)
         params = _to_plasma_params(theta, species=species, registry=registry)
-        state = solver.solve(params, grid=grid)
-        predicted = instrument.forward(state, window)
+        state = inversion_solver.solve(params, grid=grid)
+        predicted = inversion_instrument.forward(state, window)
         if noise:
-            return instrument.likelihood(measurement, predicted)
+            return inversion_instrument.likelihood(measurement, predicted)
         return _t0_log_likelihood(measurement.values, predicted.values)
 
     result = maximum_a_posteriori(log_likelihood=log_likelihood, prior=prior)
     theta_hat = _theta_from_unconstrained(result.unconstrained, reference=reference)
     params_hat = _to_plasma_params(theta_hat, species=species, registry=registry)
     estimate_gamma_e = float(
-        magnitude_in(ion_energy_flux(params_hat, h_l=solver.h_l, gamma_i=solver.gamma_i), "W/m**2")
+        magnitude_in(
+            ion_energy_flux(params_hat, h_l=inversion_solver.h_l, gamma_i=inversion_solver.gamma_i),
+            "W/m**2",
+        )
     )
 
     # ── step 5: unseal, by committing the estimate at its tier ────────────────
-    tier = tier_of_configuration(same_model=True, noise=noise, imperfect_calibration=noise)
+    tier = tier_of_configuration(
+        same_model=isinstance(resolved_truth_solver, AnalyticSheathSolver),
+        noise=noise,
+        imperfect_calibration=resolved_imperfect_calibration,
+    )
     sealed.commit_estimate(estimate_gamma_e, tier=tier)
 
     # ── step 6: emit the report ────────────────────────────────────────────────
@@ -622,31 +968,39 @@ def run_t1(seed: int = 0) -> ClosedLoopReport:
     return _run(noise=True, seed=seed)
 
 
-def run_t2(seed: int = 0) -> NoReturn:
-    """T2 — mismatched models, noise, imperfect calibration. **Not runnable here.**
+def run_t2(seed: int = 0) -> ClosedLoopReport:
+    """T2 — mismatched models, noise, imperfect calibration. doc 05 §7.1, doc 11 §9 item 4.
 
-    doc 05 §7.1 requires the truth-generating model to differ from the inversion's in
-    physics level, grid, timestep, collision set, EEDF form *and* calibration, together.
-    The only candidate mismatched physics level this project has committed
-    (`vpl.physics.fluid.sheath.FluidSheathSolver`, doc 03 §1's L1) depends on `dolfinx`
-    (FEniCSx), which is not installed in this environment; the L2 PIC-MCC kernel is out of
-    scope for this harness per the task brief (38 minutes per solve on CPU, and another
-    agent is still verifying it).
+    The truth is generated by `vpl.physics.fluid.sheath.FluidSheathSolver` (L1) with its
+    default, collisionless configuration, solved on its own mesh and observed with a
+    Druyvesteyn-shaped EEDF (`_t2_truth_eedf_factory`); the inversion stays
+    `AnalyticSheathSolver` (L0) with `MaxwellianEedf`, exactly as at every other tier. See
+    the module docstring's T2 section for the full account of which of doc 05 §7.1's six
+    mismatch axes this actually exercises, and the one (EEDF form) that is only partially
+    exercised and why.
 
-    Raising here, naming the missing piece, is the honest alternative to the tempting
-    half-measure: relabelling a same-model T1 run as T2, or mismatching only one of doc 05
-    §7.1's required axes (say, `h_l` or `gamma_i` within L0 alone) while calling it T2.
-    `vpl.validation.sealed.tier_of_configuration` already refuses the second of those for a
-    genuinely mismatched-model run that skips noise or calibration; it has no way to refuse
-    a call that mismatches nothing at all and simply claims to, which is why this function
-    refuses on this module's behalf instead.
+    Raises:
+        NotImplementedError: If `dolfinx` (FEniCSx) is not importable. L1 depends on it for
+            its finite-element assembly (`vpl.physics.fluid.sheath`'s own module
+            docstring), and importing it unconditionally at this module's top level would
+            break `run_t0`/`run_t1` in every environment without it — which is why the
+            import is deferred to here rather than hoisted to the top of the file.
     """
-    raise NotImplementedError(
-        "T2 needs a truth-generating model that genuinely differs from L0 in physics level, "
-        "grid, timestep, collision set, EEDF form and calibration together (doc 05 §7.1). "
-        "The only such model committed to this project, vpl.physics.fluid.sheath."
-        "FluidSheathSolver (doc 03 §1's L1), depends on dolfinx (FEniCSx), which is not "
-        "installed in this environment. Rather than mislabel a same-model T1 run as T2, this "
-        "harness says so: T2 cannot be produced here. Install dolfinx and wire "
-        "FluidSheathSolver in as the truth solver in _run() to close this gap."
+    try:
+        from vpl.physics.fluid.sheath import FluidSheathSolver
+    except ImportError as exc:
+        raise NotImplementedError(
+            "T2's truth-generating model, vpl.physics.fluid.sheath.FluidSheathSolver "
+            "(doc 03 §1's L1), depends on dolfinx (FEniCSx), which is not installed in "
+            "this environment. Install dolfinx to produce a T2 result here; there is "
+            "nothing else this function can honestly substitute for L1 without "
+            "reintroducing exactly the mislabelling this module used to refuse outright."
+        ) from exc
+
+    return _run(
+        noise=True,
+        seed=seed,
+        truth_solver=FluidSheathSolver(),
+        truth_eedf_factory=_t2_truth_eedf_factory,
+        imperfect_calibration=True,
     )

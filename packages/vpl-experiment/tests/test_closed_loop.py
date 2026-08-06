@@ -23,26 +23,48 @@ depends on — it is not a test of the harness's own arithmetic reproducing itse
 
 from __future__ import annotations
 
+import importlib.util
+
 import numpy as np
 import pytest
 
 from vpl.core.params import default_registry
-from vpl.core.state import PlasmaParams, Species
+from vpl.core.protocols.forward import IonEnergyFlux
+from vpl.core.state import Fidelity, PlasmaParams, PlasmaState, ScalarField, SpatialGrid, Species
 from vpl.core.units import Q_, magnitude_in
 from vpl.experiment.closed_loop import (
     T0_RELATIVE_TOLERANCE,
     ClosedLoopReport,
+    _gamma_e_at_wall,
+    _GeneralisedEedf,
+    _generate_truth,
+    _resample_onto_grid,
+    _run,
+    _t2_truth_eedf_factory,
     run_t0,
     run_t1,
     run_t2,
 )
 from vpl.inverse.parameters import ControlParameters
-from vpl.physics.analytic.sheath import GAMMA_I_COLD_ION, ion_energy_flux
+from vpl.physics.analytic.sheath import GAMMA_I_COLD_ION, AnalyticSheathSolver, ion_energy_flux
+from vpl.physics.eedf.analytic import (
+    DRUYVESTEYN_KAPPA,
+    MAXWELLIAN_KAPPA,
+    druyvesteyn_eedf,
+    maxwellian_eedf,
+)
+from vpl.physics.eedf.grid import EnergyGrid
 from vpl.validation.sealed import InverseCrimeError, Tier, TierMismatchError
 
 #: Two seeds, so the reproducibility test is not vacuously comparing an object to itself.
 _SEED_A = 0
 _SEED_B = 1
+
+#: Whether dolfinx (FEniCSx) is importable in this environment. T2's truth solver, L1's
+#: FluidSheathSolver, depends on it; tests that need a real T2 run skip cleanly when it is
+#: absent (this development machine), and one test below exercises the opposite case —
+#: that run_t2 fails loudly and specifically when dolfinx is missing — only when it applies.
+_DOLFINX_AVAILABLE = importlib.util.find_spec("dolfinx") is not None
 
 
 # ─── T0 — the blocking gate ───────────────────────────────────────────────────────
@@ -165,25 +187,295 @@ class TestT1OptimisticBound:
         assert first.T_e_hat_ev == second.T_e_hat_ev
 
 
-# ─── T2 — honest, and honestly absent ──────────────────────────────────────────────
+# ─── T2 — mismatched models, noise, imperfect calibration ─────────────────────────
 
 
-class TestT2Unavailable:
-    """T2 needs a genuinely different truth-generating model — doc 05 §7.1.
-
-    L0 is the only forward model this environment can run (the L1 fluid solver depends on
-    ``dolfinx``, which is not installed here, and the L2 PIC-MCC kernel is explicitly
-    out of scope for this harness per the task brief). Faking T2 by, say, changing L0's own
-    ``h_l`` or ``gamma_i`` between truth and inversion would be exactly the "tempting
-    half-measure" ``vpl.validation.sealed.tier_of_configuration`` is written to refuse: doc
-    05 §7.1 requires physics level, grid, timestep, collision set, EEDF form *and*
-    calibration to differ together, not any one of them in isolation. So this harness does
-    not mislabel a same-model run as T2; it says plainly that T2 cannot run here.
+class TestT2RequiresDolfinx:
+    """L1's ``FluidSheathSolver`` is the truth-generating model doc 05 §7.1 needs, and it
+    depends on ``dolfinx`` (FEniCSx). This machine does not have it installed, so this is
+    the one T2 test that is *expected* to run here — and to run only here: once dolfinx is
+    available, ``run_t2`` must stop raising and this test's premise no longer holds.
     """
 
+    @pytest.mark.skipif(_DOLFINX_AVAILABLE, reason="dolfinx is installed; T2 is runnable")
     def test_states_the_missing_dependency_rather_than_mislabelling_a_run(self) -> None:
         with pytest.raises(NotImplementedError, match="dolfinx"):
             run_t2(seed=_SEED_A)
+
+
+class TestT2ProducesACertifiedResult:
+    """The other side of :class:`TestT2RequiresDolfinx`: with dolfinx installed, ``run_t2``
+    must actually produce a tier-certified result rather than continue to refuse. Skipped
+    everywhere this repository's local test run happens (no dolfinx on this machine); it is
+    the test the remote FEniCSx-enabled environment exists to pass.
+    """
+
+    @pytest.mark.skipif(not _DOLFINX_AVAILABLE, reason="requires dolfinx (FEniCSx)")
+    def test_run_t2_is_certified_at_tier_2_by_sealed_tier_of_configuration(self) -> None:
+        report = run_t2(seed=_SEED_A)
+
+        assert report.tier is Tier.T2
+        assert np.isfinite(report.relative_error)
+        assert report.relative_error >= 0.0
+        # Doesn't raise: T2 satisfies its own bar, certified by tier_of_configuration
+        # rather than hand-labelled by this module (doc 11 §9 item 4's task brief).
+        report.sealed.assert_at_least(Tier.T2)
+
+    @pytest.mark.skipif(not _DOLFINX_AVAILABLE, reason="requires dolfinx (FEniCSx)")
+    def test_t2_result_is_not_eligible_for_the_t0_consistency_check(self) -> None:
+        """T2 is noisy and mismatched by construction; the T0 numerical-tolerance gate
+        would either fail spuriously or, worse, be loosened until it did not — exactly the
+        failure `assert_t0_consistency` exists to make impossible quietly (doc 05 §7.2)."""
+        report = run_t2(seed=_SEED_A)
+        with pytest.raises(TierMismatchError):
+            report.sealed.assert_t0_consistency(tolerance=1.0)
+
+
+# ─── the refactor's regression guard: T0/T1 must be unchanged by the new parameters ──
+
+
+class TestRefactorPreservesT0AndT1:
+    """doc 11 §9 item 4's constraint: T0 and T1 are blocking/optimistic-bound results and
+    must keep their pre-refactor numbers exactly. ``run_t0``/``run_t1`` still call
+    ``_run`` with no new arguments, so this is really a check that ``_run``'s new
+    ``truth_solver=None`` / ``truth_eedf_factory=None`` / ``imperfect_calibration=None``
+    defaults are equivalent to stating the T0/T1 configuration explicitly — if they were
+    not, this would be the test that would catch it, not a diff nobody reads.
+    """
+
+    def test_explicit_l0_maxwellian_arguments_reproduce_run_t0(self) -> None:
+        defaulted = _run(noise=False, seed=_SEED_A)
+        explicit = _run(
+            noise=False,
+            seed=_SEED_A,
+            truth_solver=AnalyticSheathSolver(),
+            truth_eedf_factory=lambda grid: _GeneralisedEedf(grid=grid, kappa=MAXWELLIAN_KAPPA),
+            imperfect_calibration=False,
+        )
+
+        assert defaulted.n_0_hat_per_m3 == explicit.n_0_hat_per_m3
+        assert defaulted.T_e_hat_ev == explicit.T_e_hat_ev
+        assert defaulted.gamma_e_true_w_per_m2 == explicit.gamma_e_true_w_per_m2
+        assert defaulted.gamma_e_estimate_w_per_m2 == explicit.gamma_e_estimate_w_per_m2
+        assert defaulted.tier is explicit.tier is Tier.T0
+
+    def test_explicit_l0_maxwellian_arguments_reproduce_run_t1(self) -> None:
+        defaulted = _run(noise=True, seed=_SEED_A)
+        explicit = _run(
+            noise=True,
+            seed=_SEED_A,
+            truth_solver=AnalyticSheathSolver(),
+            truth_eedf_factory=lambda grid: _GeneralisedEedf(grid=grid, kappa=MAXWELLIAN_KAPPA),
+            imperfect_calibration=True,
+        )
+
+        assert defaulted.n_0_hat_per_m3 == explicit.n_0_hat_per_m3
+        assert defaulted.T_e_hat_ev == explicit.T_e_hat_ev
+        assert defaulted.tier is explicit.tier is Tier.T1
+
+
+# ─── _gamma_e_at_wall: doc 03 §6's "same functional", read off two return shapes ──
+
+
+class TestGammaEAtWall:
+    """L0's ``.flux(state)`` returns a bare pint ``Quantity``; L1's returns an
+    :class:`IonEnergyFlux`. Both must reduce to the same kind of float so ``_run`` does
+    not need to know which physics level produced the truth (doc 00 E1)."""
+
+    def test_reads_a_bare_quantity_in_watts_per_square_metre(self) -> None:
+        assert _gamma_e_at_wall(Q_(1234.5, "W/m**2")) == pytest.approx(1234.5)
+
+    def test_converts_a_quantity_in_other_energy_flux_units(self) -> None:
+        assert _gamma_e_at_wall(Q_(1.0, "kW/m**2")) == pytest.approx(1000.0)
+
+    def test_reads_an_ion_energy_flux(self) -> None:
+        registry = default_registry()
+        species = Species(name="Ar+", mass=registry["species.Ar.mass"].quantity, charge_number=1)
+        flux = IonEnergyFlux(
+            position=Q_(0.0, "m"),
+            species=species,
+            energy_flux_toward_wall_watt_per_m2=np.asarray(6577.0),
+            particle_flux_toward_wall_per_m2_s=np.asarray(1.0e20),
+            fidelity=Fidelity.L1,
+        )
+
+        assert _gamma_e_at_wall(flux) == pytest.approx(6577.0)
+
+
+# ─── _resample_onto_grid: the grid discipline T2's own solve/observe split needs ──
+
+
+def _linear_state(*, grid: SpatialGrid, params: PlasmaParams) -> PlasmaState:
+    """A state whose fields are exactly linear in ``z`` — so linear interpolation onto a
+    coarser grid reproduces the closed form exactly, not just approximately."""
+
+    def field(name: str, *, at_wall: float, slope: float, units: str) -> ScalarField:
+        return ScalarField(
+            name=name,
+            values=at_wall + slope * grid.z_m,
+            units=units,
+            grid=grid,
+            time=None,
+        )
+
+    return PlasmaState(
+        params=params,
+        grid=grid,
+        time=None,
+        fields={
+            "n_e": field("n_e", at_wall=1.0e15, slope=1.0e14, units="m**-3"),
+            "n_i": field("n_i", at_wall=1.0e15, slope=1.0e14, units="m**-3"),
+            "Phi": field("Phi", at_wall=0.0, slope=10.0, units="V"),
+            "T_e": field("T_e", at_wall=3.0, slope=0.1, units="eV"),
+        },
+        ion_distribution=None,
+        fidelity=Fidelity.L1,
+    )
+
+
+class TestResampleOntoGrid:
+    def test_reproduces_a_linear_profile_exactly_at_the_new_grid_points(self) -> None:
+        registry = default_registry()
+        species = Species(name="Ar+", mass=registry["species.Ar.mass"].quantity, charge_number=1)
+        params = _plasma_params(ControlParameters.reference().replace(n_0=5.0e17))
+        native = SpatialGrid.uniform(length=Q_(0.02, "m"), n_points=41)
+        state = _linear_state(grid=native, params=params)
+        target = SpatialGrid.uniform(length=Q_(0.01, "m"), n_points=5)
+
+        resampled = _resample_onto_grid(state, target)
+
+        assert resampled.grid is target
+        np.testing.assert_allclose(
+            resampled.field("n_e").values, 1.0e15 + 1.0e14 * target.z_m
+        )
+        np.testing.assert_allclose(resampled.field("Phi").values, 10.0 * target.z_m)
+        del species  # constructed only to keep params realistic; unused directly
+
+    def test_rejects_a_target_grid_reaching_past_the_native_domain(self) -> None:
+        registry = default_registry()
+        params = _plasma_params(ControlParameters.reference())
+        native = SpatialGrid.uniform(length=Q_(0.01, "m"), n_points=11)
+        state = _linear_state(grid=native, params=params)
+        target = SpatialGrid.uniform(length=Q_(0.02, "m"), n_points=5)
+
+        with pytest.raises(ValueError, match="native"):
+            _resample_onto_grid(state, target)
+        del registry  # imported for parity with the other tests in this module
+
+    def test_the_resampled_state_still_satisfies_the_plasma_state_contract(self) -> None:
+        params = _plasma_params(ControlParameters.reference())
+        native = SpatialGrid.uniform(length=Q_(0.02, "m"), n_points=21)
+        state = _linear_state(grid=native, params=params)
+        target = SpatialGrid.uniform(length=Q_(0.01, "m"), n_points=7)
+
+        resampled = _resample_onto_grid(state, target)
+
+        assert isinstance(resampled, PlasmaState)
+        assert resampled.grid.n_points == 7
+
+
+# ─── _generate_truth: the L0 branch, testable without dolfinx ─────────────────────
+
+
+class TestGenerateTruthWithAnalyticSolver:
+    """The L1 branch needs ``FluidSheathSolver`` (dolfinx) and is covered by
+    :class:`TestT2ProducesACertifiedResult` instead. This class checks that when the truth
+    solver *is* the same ``AnalyticSheathSolver`` the inversion uses — T0/T1's
+    configuration — ``_generate_truth`` reduces to exactly the pre-refactor code path:
+    solve directly on the fixed observation grid, no resampling.
+    """
+
+    def test_solves_directly_on_the_observation_grid_with_no_resampling(self) -> None:
+        registry = default_registry()
+        species = Species(name="Ar+", mass=registry["species.Ar.mass"].quantity, charge_number=1)
+        solver = AnalyticSheathSolver()
+        theta = ControlParameters.reference()
+        params = _plasma_params(theta)
+        grid = SpatialGrid.uniform(length=Q_(0.01, "m"), n_points=11)
+
+        state, gamma_e = _generate_truth(params, truth_solver=solver, observation_grid=grid)
+
+        assert state.grid is grid
+        expected = float(
+            magnitude_in(
+                ion_energy_flux(params, h_l=solver.h_l, gamma_i=solver.gamma_i), "W/m**2"
+            )
+        )
+        assert gamma_e == pytest.approx(expected)
+        del species
+
+
+# ─── the EEDF mismatch: doc 05 §7.1, and the route actually taken ──────────────────
+
+
+class TestGeneralisedEedfProvider:
+    """``_GeneralisedEedf`` wraps :func:`vpl.physics.eedf.analytic.generalised_eedf` as an
+    ``EedfProvider`` — the "inversion side" of doc 05 §7.1's EEDF mismatch, per the
+    parameter registry's own ``eedf.kappa`` entry (coordinator correction to this task: the
+    kappa-parameterised family is the *inversion's* family, not truth's; see the module
+    docstring for the full account and why ``vpl.instruments.oes.instrument.KappaEedf`` is
+    not used here at all). Defined in this package rather than ``vpl-instruments`` because
+    that package is off-limits for this task.
+    """
+
+    def test_at_kappa_one_it_matches_maxwellian_eedf_bit_for_bit(self) -> None:
+        grid = EnergyGrid.linear(max_ev=60.0, n_cells=100)
+        provider = _GeneralisedEedf(grid=grid, kappa=MAXWELLIAN_KAPPA)
+
+        actual = provider.f0(electron_temperature_ev=3.0)
+        expected = grid.normalise(maxwellian_eedf(grid.centres_ev, electron_temperature_ev=3.0))
+
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_at_kappa_two_it_matches_the_druyvesteyn_closed_form(self) -> None:
+        grid = EnergyGrid.linear(max_ev=60.0, n_cells=100)
+        provider = _GeneralisedEedf(grid=grid, kappa=DRUYVESTEYN_KAPPA)
+
+        actual = provider.f0(electron_temperature_ev=3.0)
+        expected = grid.normalise(
+            druyvesteyn_eedf(grid.centres_ev, mean_energy_ev=1.5 * 3.0)
+        )
+
+        np.testing.assert_allclose(actual, expected)
+
+    def test_maxwellian_and_druyvesteyn_disagree_at_the_same_t_e(self) -> None:
+        # The point of the whole exercise: doc 05 §7.1 needs a second *shape*, not a
+        # relabelled Maxwellian at the same T_e.
+        grid = EnergyGrid.linear(max_ev=60.0, n_cells=100)
+        maxwellian = _GeneralisedEedf(grid=grid, kappa=MAXWELLIAN_KAPPA)
+        druyvesteyn = _GeneralisedEedf(grid=grid, kappa=DRUYVESTEYN_KAPPA)
+
+        assert not np.allclose(
+            maxwellian.f0(electron_temperature_ev=3.0), druyvesteyn.f0(electron_temperature_ev=3.0)
+        )
+
+    def test_rejects_a_non_positive_electron_temperature(self) -> None:
+        grid = EnergyGrid.linear(max_ev=60.0, n_cells=100)
+        provider = _GeneralisedEedf(grid=grid, kappa=DRUYVESTEYN_KAPPA)
+
+        with pytest.raises(ValueError, match="T_e"):
+            provider.f0(electron_temperature_ev=0.0)
+
+    def test_f0_is_cached_per_temperature(self) -> None:
+        grid = EnergyGrid.linear(max_ev=60.0, n_cells=100)
+        provider = _GeneralisedEedf(grid=grid, kappa=DRUYVESTEYN_KAPPA)
+
+        first = provider.f0(electron_temperature_ev=3.0)
+        second = provider.f0(electron_temperature_ev=3.0)
+
+        assert first is second
+
+
+def test_t2_truth_eedf_factory_returns_the_druyvesteyn_shape() -> None:
+    """The concrete choice this harness makes for T2's truth EEDF: doc 03 §3.2's own
+    stated real-world shape ("Druyvesteyn-like with a depleted tail"), not an arbitrary
+    kappa. Testable without dolfinx: this factory only touches ``vpl.physics.eedf``."""
+    grid = EnergyGrid.linear(max_ev=60.0, n_cells=100)
+
+    provider = _t2_truth_eedf_factory(grid)
+
+    assert isinstance(provider, _GeneralisedEedf)
+    assert provider.kappa == DRUYVESTEYN_KAPPA
 
 
 # ─── the honesty check: why the recovered vector is 2-dimensional, not 8 ──────────
