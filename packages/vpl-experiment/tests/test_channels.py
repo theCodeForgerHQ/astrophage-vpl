@@ -35,6 +35,7 @@ from vpl.experiment.closed_loop import (
     _reference_theta,
     _to_plasma_params,
 )
+from vpl.instruments.lif.instrument import _sheath_edge_index
 from vpl.inverse.fusion import JointLikelihood
 from vpl.inverse.parameters import ControlParameters
 from vpl.physics.analytic.sheath import AnalyticSheathSolver
@@ -266,18 +267,34 @@ class TestWhatLifAddsThatOesCannotSee:
         assert lif_penalty > oes_penalty
 
 
-class TestTheTuningRangeBlocker:
-    """doc 01 §5.1 and doc 14 RS-03, as they actually bite at RP-1.
+class TestTheTuningRange:
+    """doc 01 §5.1 and doc 14 RS-03 at RP-1 — a constraint that existed and then lifted.
 
-    Pinned rather than left in a docstring because it is the single fact that decides
-    whether connecting LIF helps the run the project actually cares about.
+    **This class used to assert the opposite of what it asserts now, and the history is
+    the point.** When this module was written, ``LifInstrument._expected_ion_speed``
+    anchored its gate on the free-fall speed across the *whole* sheath drop: 34.9 km/s for
+    argon through RP-1's -250 V, against the 25.8 km/s ceiling a 20 GHz mode-hop-free
+    laser can reach. LIF therefore declared itself blind at RP-1, the fusion layer excluded
+    it, and connecting the channel did nothing at the operating point the project actually
+    cares about. That was recorded here as a blocker, and in ``channels.py``'s module
+    docstring as needing "a refinement of that gate inside ``vpl-instruments``".
+
+    That refinement has since landed: the gate is now anchored at the sheath-edge Bohm
+    speed, and ``_resolve_z_index`` defaults the measurement volume to the sheath-edge grid
+    node, on doc 01 §5.1's own stated mitigation — measure at the edge and *propagate* to
+    the wall, rather than pretend the wall IVDF is directly reachable. So LIF is now
+    informative at RP-1 and these tests say so.
+
+    They are kept, re-based rather than deleted, because a reader who finds only the
+    passing assertion has no way to know the constraint was ever real or why
+    ``_REACHABLE_BIAS_V`` exists at all.
     """
 
-    def test_lif_declares_itself_blind_at_the_rp1_wall_bias(self, channels: ChannelSet) -> None:
+    def test_lif_is_now_informative_at_the_rp1_wall_bias(self, channels: ChannelSet) -> None:
         registry = default_registry()
         rp1 = _to_plasma_params(_reference_theta(), species=_argon_ion(registry), registry=registry)
 
-        assert not channels.lif.is_informative(rp1)
+        assert channels.lif.is_informative(rp1)
 
     def test_lif_is_reachable_at_the_reduced_bias_these_tests_run_at(
         self, channels: ChannelSet
@@ -289,16 +306,42 @@ class TestTheTuningRangeBlocker:
 
         assert channels.lif.is_informative(reachable)
 
-    def test_at_rp1_the_joint_likelihood_is_oes_alone_and_says_so(
-        self, channels: ChannelSet
-    ) -> None:
-        # doc 01 IF-6: the blind channel's term is not formed, and it is *named*. A run
-        # that reported "two channels fused" here would be making a false claim.
+    def test_at_rp1_both_channels_now_contribute(self, channels: ChannelSet) -> None:
+        # The result the whole exercise was for: a genuine two-channel fusion at RP-1's own
+        # operating point, with nothing excluded. doc 01 IF-6's naming discipline still
+        # applies — `excluded` being empty is a checked claim, not an assumption.
         rp1_state = _reference_state()
         joint = channels.joint(channels.observe(rp1_state))
 
         detail = joint.detail(rp1_state)
 
-        assert detail.contributing == (OES_CHANNEL,)
-        assert detail.excluded == (LIF_CHANNEL,)
+        assert set(detail.contributing) == {OES_CHANNEL, LIF_CHANNEL}
+        assert detail.excluded == ()
         assert math.isfinite(detail.log_prob)
+
+    def test_the_measurement_volume_is_pinned_and_does_not_move_with_theta(
+        self, channels: ChannelSet
+    ) -> None:
+        # The guard that matters most now that the gate has opened.
+        #
+        # `LifInstrument._resolve_z_index` defaults to the sheath-edge node *of the state
+        # it is handed*, and that node moves with theta — measured across the region a MAP
+        # search explores it comes out 3, 2 or 1. A measurement volume that relocates with
+        # the trial parameters is a theta-dependent observation location, which is the same
+        # class of inverse crime `closed_loop.py`'s module docstring documents for the
+        # spatial grid, where it produced a 15-20 % error and reported `converged=True`.
+        #
+        # `build_channels` therefore passes an explicit `lif_z_index` and pins the volume.
+        # This test fails if that is ever "simplified" away.
+        theta = _operating_theta()
+        sparse = _state(theta)
+        dense = _state(theta.replace(n_0=theta.n_0 * 2.0))
+
+        # Sanity: these two states genuinely disagree about where the sheath edge is, so
+        # the assertion below is not vacuous.
+        tolerance = float(default_registry().value_in("sheath.edge_tolerance", "dimensionless"))
+        assert _sheath_edge_index(sparse, tolerance=tolerance) != _sheath_edge_index(
+            dense, tolerance=tolerance
+        )
+
+        assert channels.lif._resolve_z_index(sparse) == channels.lif._resolve_z_index(dense)

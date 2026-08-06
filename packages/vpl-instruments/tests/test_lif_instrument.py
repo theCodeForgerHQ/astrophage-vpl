@@ -64,6 +64,40 @@ def _params(*, n_0: float = 1.0e17, T_i_ev: float = 0.05, bias_v: float = -250.0
     )
 
 
+#: A synthetic quasineutrality-departure profile for the 5-point ``_GRID``: monotonically
+#: falling from the wall (index 0) toward the bulk (index 4), crossing the registered
+#: ``sheath.edge_tolerance`` (0.01) between indices 2 and 3. The outermost index at or
+#: above tolerance is therefore 2 — neither the wall nor the bulk boundary — which is
+#: what makes ``_state()`` usable for testing that the default measurement location is
+#: the sheath edge and not the wall.
+_DEPARTURE = np.array([0.5, 0.15, 0.03, 0.004, 0.0005])
+
+#: The outermost grid index of ``_DEPARTURE`` at or above ``sheath.edge_tolerance``.
+_SHEATH_EDGE_INDEX = 2
+
+
+def _sheath_fields(*, n_0: float) -> dict[str, ScalarField]:
+    """The required ``n_e``/``n_i``/``Phi``/``T_e`` fields, with a real sheath profile.
+
+    ``n_e`` is held at the bulk density and ``n_i`` is backed out from ``_DEPARTURE`` so
+    that ``(n_i - n_e) / n_i`` matches it exactly, which is what lets these fixtures
+    exercise the default sheath-edge z_index resolution rather than always handing it an
+    explicit override.
+    """
+    n_e = np.full(_GRID.n_points, n_0)
+    n_i = n_e / (1.0 - _DEPARTURE)
+    return {
+        "n_e": ScalarField(name="n_e", values=n_e, units="m**-3", grid=_GRID, time=None),
+        "n_i": ScalarField(name="n_i", values=n_i, units="m**-3", grid=_GRID, time=None),
+        "Phi": ScalarField(
+            name="Phi", values=np.zeros(_GRID.n_points), units="V", grid=_GRID, time=None
+        ),
+        "T_e": ScalarField(
+            name="T_e", values=np.full(_GRID.n_points, 3.0), units="eV", grid=_GRID, time=None
+        ),
+    }
+
+
 def _state(*, drift: float = -2.7e3, T_i_ev: float = 0.05, n_0: float = 1.0e17) -> PlasmaState:
     species = _argon()
     sigma = math.sqrt(T_i_ev * _E_C / species.mass_kg)
@@ -73,6 +107,30 @@ def _state(*, drift: float = -2.7e3, T_i_ev: float = 0.05, n_0: float = 1.0e17) 
         / (math.sqrt(2.0 * math.pi) * sigma)
         * np.exp(-((velocity - drift) ** 2) / (2.0 * sigma**2))
     )
+    return PlasmaState(
+        params=_params(n_0=n_0, T_i_ev=T_i_ev),
+        grid=_GRID,
+        time=None,
+        fields=_sheath_fields(n_0=n_0),
+        ion_distribution=VelocityDistribution(
+            grid=_GRID,
+            v_m_per_s=velocity,
+            values=np.tile(profile, (_GRID.n_points, 1)),
+            species=species,
+        ),
+        fidelity=Fidelity.L0,
+    )
+
+
+def _flat_state(*, n_0: float = 1.0e17) -> PlasmaState:
+    """A genuinely flat, quasineutral state — ``n_i == n_e`` everywhere, no sheath edge.
+
+    Used to check that the default z_index resolution refuses to invent a location
+    rather than silently falling back to the wall or the bulk boundary.
+    """
+    species = _argon()
+    velocity = np.linspace(-1.0e3, 1.0e3, 2001)
+    profile = np.exp(-(velocity**2) / (2.0 * (1.0e2**2)))
     fields = {
         "n_e": ScalarField(
             name="n_e", values=np.full(_GRID.n_points, n_0), units="m**-3", grid=_GRID, time=None
@@ -88,7 +146,7 @@ def _state(*, drift: float = -2.7e3, T_i_ev: float = 0.05, n_0: float = 1.0e17) 
         ),
     }
     return PlasmaState(
-        params=_params(n_0=n_0, T_i_ev=T_i_ev),
+        params=_params(n_0=n_0),
         grid=_GRID,
         time=None,
         fields=fields,
@@ -97,6 +155,41 @@ def _state(*, drift: float = -2.7e3, T_i_ev: float = 0.05, n_0: float = 1.0e17) 
             v_m_per_s=velocity,
             values=np.tile(profile, (_GRID.n_points, 1)),
             species=species,
+        ),
+        fidelity=Fidelity.L0,
+    )
+
+
+def _state_with_distinguishable_rows(*, n_0: float = 1.0e17) -> PlasmaState:
+    """A state whose IVDF differs at every grid row, keyed to the row's index.
+
+    Row ``_SHEATH_EDGE_INDEX`` carries a drift near the RP-1 Bohm speed (2.7 km/s);
+    every other row, including the wall (index 0), carries a drift far outside the
+    +/-4 GHz scan span these tests configure. Whichever row :meth:`forward` actually
+    reads is therefore visible in the output amplitude, which is what lets
+    ``TestTheMeasurementLocation`` tell the sheath-edge row from the wall row through
+    the public API rather than by reaching into a private method.
+    """
+    species = _argon()
+    T_i_ev = 0.05
+    sigma = math.sqrt(T_i_ev * _E_C / species.mass_kg)
+    velocity = np.linspace(-4.0e4, 4.0e4, 4001)
+    row_drifts = np.array([-3.47e4, -2.5e4, -2.7e3, -1.8e4, -1.0e4])
+    rows = np.stack(
+        [
+            n_0
+            / (math.sqrt(2.0 * math.pi) * sigma)
+            * np.exp(-((velocity - drift) ** 2) / (2.0 * sigma**2))
+            for drift in row_drifts
+        ]
+    )
+    return PlasmaState(
+        params=_params(n_0=n_0, T_i_ev=T_i_ev),
+        grid=_GRID,
+        time=None,
+        fields=_sheath_fields(n_0=n_0),
+        ion_distribution=VelocityDistribution(
+            grid=_GRID, v_m_per_s=velocity, values=rows, species=species
         ),
         fidelity=Fidelity.L0,
     )
@@ -357,25 +450,121 @@ class TestTheDetectionGate:
         """Doc 01 IF-6: below the floor the channel is modelled as *absent*."""
         assert not _configured().is_informative(_params(n_0=1.0e13, bias_v=-20.0))
 
-    def test_a_high_bias_sheath_is_gated_off_by_the_tuning_range(self) -> None:
-        """The doc 01 §5.1 limitation, enforced at the doc 08 §4 protocol boundary.
+    def test_rp1_is_informative_once_the_gate_is_referenced_to_the_sheath_edge(self) -> None:
+        """The headline fix.
 
-        At a 250 V bias the ions entering the wall are far outside the reachable velocity
-        window, so the channel is not weakly informative — it is uninformative, and doc 01
-        IF-6 requires that to be expressed by the term not being formed.
+        RP-1 is a -250 V wall bias, and the *wall* free-fall speed that produces
+        (34.9 km/s, doc 01 §5.1's LIF-3 note and channels.py's docstring both name it
+        explicitly) is genuinely outside the 25.8 km/s tuning ceiling. But this channel
+        measures at the sheath edge and propagates outward (doc 06 §4's model-error
+        term), never at the wall, so the gate must ask whether *that* speed — order
+        ``c_s``, doc 01 §2.2's 2.69 km/s — is reachable. It comfortably is.
         """
-        assert not _configured().is_informative(_params(bias_v=-250.0, T_i_ev=0.05))
+        assert _configured().is_informative(_params(bias_v=-250.0, T_i_ev=0.05))
 
-    def test_a_low_bias_sheath_stays_inside_the_tuning_range(self) -> None:
-        assert _configured().is_informative(_params(bias_v=-20.0))
+    def test_the_gate_no_longer_compares_the_wall_free_fall_speed(self) -> None:
+        """Pin the mechanism, not just the outcome.
+
+        The speed the gate computes at RP-1 must sit near ``c_s`` plus a few thermal
+        widths (order 3.7 km/s), nowhere near the 34.9 km/s wall free-fall speed the old
+        gate used. A fix that only changed the outcome and not this number would be a
+        loosened ceiling wearing the sheath-edge argument as a costume.
+        """
+        instrument = _configured()
+        params = _params(bias_v=-250.0, T_i_ev=0.05)
+
+        speed = instrument._expected_ion_speed(params)
+
+        assert speed == pytest.approx(2.69e3 + 3.0 * 347.5, rel=0.05)
+        assert speed < 5.0e3
+
+    def test_the_doppler_shift_at_rp1_lands_in_the_sheath_edge_band_doc01_quotes(self) -> None:
+        """The number that proves this is a location fix and not a loosened threshold.
+
+        doc 01 §5.1's LIF-3 note computes the wall's 51.9 GHz as ``v / lambda`` (no
+        grazing-angle projection — that is a separate, larger reach effect doc 02 §4.2
+        layers on top) and states the sheath-edge band as 4-12 GHz for ``c_s``-``3 c_s``.
+        The gate's internal speed, run through the same ``v / lambda``, must land in
+        that band rather than merely asserting the outcome flipped.
+        """
+        instrument = _configured()
+        params = _params(bias_v=-250.0, T_i_ev=0.05)
+        speed = instrument._expected_ion_speed(params)
+
+        lambda_m = float(magnitude_in(default_registry().quantity("LIF.pump_wavelength"), "m"))
+        shift_hz = speed / lambda_m
+
+        assert 4.0e9 <= shift_hz <= 12.0e9
+
+    def test_an_anomalously_hot_ion_population_is_still_gated_off(self) -> None:
+        """A gate that never fires is not a gate.
+
+        Even referenced to the sheath edge, a sufficiently hot ion population's own
+        thermal Doppler width can alone exceed the 20 GHz mode-hop-free range — a
+        genuinely different failure mode from the wall free-fall speed doc 01 §5.1 warns
+        about (e.g. a strongly non-thermal presheath, or a stress-test corner of the
+        parameter space), and evidence that the fix narrows what the gate refuses rather
+        than disabling it.
+        """
+        assert not _configured().is_informative(_params(bias_v=-250.0, T_i_ev=50.0))
 
     def test_the_gate_moves_with_the_grazing_angle(self) -> None:
-        """A steeper beam sees more of ``v_z`` per hertz and therefore reaches less far."""
+        """A steeper beam sees more of ``v_z`` per hertz and reaches less far.
+
+        Even referenced to the sheath edge rather than the wall: ``T_i`` = 3 eV puts the
+        sheath-edge speed (``c_s`` + 3 thermal widths, ~10.8 km/s) between the two
+        ceilings — inside the 25.8 km/s reach of the nominal 15 deg beam, outside the
+        6.7 km/s reach of a 90 deg one.
+        """
         shallow = _configured()
         steep = _configured(grazing_angle_deg=90.0)
+        params = _params(T_i_ev=3.0)
 
-        assert shallow.is_informative(_params(bias_v=-100.0))
-        assert not steep.is_informative(_params(bias_v=-100.0))
+        assert shallow.is_informative(params)
+        assert not steep.is_informative(params)
+
+
+class TestTheMeasurementLocation:
+    def test_the_default_location_is_the_sheath_edge_row_not_the_wall_row(self) -> None:
+        """doc 01 §5.1: LIF measures at (and just inside) the sheath edge, not the wall.
+
+        ``_state_with_distinguishable_rows`` gives every grid row a different IVDF, keyed
+        to its index, so whichever row :meth:`forward` actually reads is visible in the
+        output. The default (no ``z_index`` override) must match the explicit sheath-edge
+        override and differ from the explicit wall override.
+        """
+        state = _state_with_distinguishable_rows()
+
+        default = _configured(scan_half_span_ghz=4.0).forward(state, _WINDOW)
+        at_edge = _configured(scan_half_span_ghz=4.0, z_index=_SHEATH_EDGE_INDEX).forward(
+            state, _WINDOW
+        )
+        at_wall = _configured(scan_half_span_ghz=4.0, z_index=0).forward(state, _WINDOW)
+
+        np.testing.assert_array_equal(default.values, at_edge.values)
+        assert not np.allclose(default.values, at_wall.values)
+
+    def test_an_explicit_z_index_overrides_the_default(self) -> None:
+        """doc 07's sensitivity study sweeps ``z_index`` explicitly, including to the
+
+        wall (``0``); an explicit override must be honoured exactly, not replaced by the
+        sheath-edge default.
+        """
+        state = _state_with_distinguishable_rows()
+
+        at_wall = _configured(scan_half_span_ghz=4.0, z_index=0).forward(state, _WINDOW)
+        at_some_other_row = _configured(scan_half_span_ghz=4.0, z_index=1).forward(state, _WINDOW)
+
+        assert not np.allclose(at_wall.values, at_some_other_row.values)
+
+    def test_a_flat_quasineutral_state_has_no_default_location(self) -> None:
+        """No sheath, no default: the resolver must not silently invent a location.
+
+        A caller measuring a genuinely flat, quasineutral state (e.g. a bulk sanity
+        check) has to say so with an explicit ``z_index`` rather than have one guessed.
+        """
+        with pytest.raises(ValueError, match=r"sheath\.edge_tolerance"):
+            _configured(scan_half_span_ghz=4.0).forward(_flat_state(), _WINDOW)
 
 
 class TestTheReportedRunConditions:

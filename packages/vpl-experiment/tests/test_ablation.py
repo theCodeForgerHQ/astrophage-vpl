@@ -1,9 +1,11 @@
 """The channel ablation experiment — doc 11 §9 item 6, WBS 4.9.
 
-``vpl.experiment.channels``'s own test file, ``test_channels.py``, already establishes that
-LIF is reachable at -100 V and blind at RP-1's -250 V; this file does not re-derive either
-fact, it checks that :mod:`vpl.experiment.ablation` reports them correctly and that the
-sweep it runs cannot silently mislabel or corrupt a configuration.
+``vpl.experiment.channels``'s own test file, ``test_channels.py``, establishes that LIF is
+reachable at -100 V; this file does not re-derive that. It used to also establish that LIF
+was blind at RP-1's -250 V, before ``vpl-instruments`` re-anchored the LIF tuning-range gate
+at the sheath edge — see ``vpl.experiment.ablation``'s module docstring, "RP-1's blindness,
+past tense", for the full account. This file checks the *current* behaviour at both bias
+points and that the sweep it runs cannot silently mislabel or corrupt a configuration.
 
 A single MAP recovery through the LIF channel costs 10-25 s here (measured), so the tests
 that actually run a recovery are grouped behind two module-scoped, ``slow``-marked fixtures
@@ -168,11 +170,18 @@ class TestRunAblation:
 
 @pytest.mark.slow
 class TestRp1Baseline:
-    def test_lif_is_named_excluded_despite_being_requested(self, rp1: AblationResult) -> None:
-        # doc 01 IF-6, as it actually bites at the bias the project cares about: a
-        # configuration nominally containing two channels but running on one must say so.
-        assert rp1.contributing == (OES_CHANNEL,)
-        assert rp1.excluded == (LIF_CHANNEL,)
+    def test_both_channels_now_contribute_at_rp1_after_the_lif_gate_was_reanchored(
+        self, rp1: AblationResult
+    ) -> None:
+        # This used to pin doc 01 IF-6's exclusion: LIF declared itself blind at RP-1's
+        # -250 V because its tuning-range gate compared against the free-fall speed at the
+        # *wall*. vpl-instruments has since re-anchored that gate at the sheath-edge Bohm
+        # speed (see ablation.py's module docstring, "RP-1's blindness, past tense"), and
+        # channels.py's LIF channel now measures at the sheath edge by default too, so both
+        # channels are informative here. This is the check that would catch a regression
+        # back to the old, wall-anchored gate.
+        assert rp1.contributing == (OES_CHANNEL, LIF_CHANNEL)
+        assert rp1.excluded == ()
 
     def test_the_label_names_it_as_the_rp1_configuration(self, rp1: AblationResult) -> None:
         assert rp1.label == RP1_LABEL

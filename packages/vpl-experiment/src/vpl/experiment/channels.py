@@ -15,22 +15,39 @@ product and slides along the degeneracy. LIF measures the ion velocity distribut
 directly — line centre from the drift, width from ``T_i``, amplitude from ``n_i`` — which
 is a different functional of the same state, and different is the whole point.
 
-## Two findings this module ran into, both stated rather than worked around
+## Three findings this module ran into, all stated rather than worked around
 
-**1. At the RP-1 wall bias the LIF channel is blind, and the joint likelihood is OES
-alone.** doc 01 §5.1 and doc 14 RS-03 give the laser a 20 GHz mode-hop-free range, which
-with doc 02 §4.2's 15 degree grazing geometry is a hard ceiling of 25.8 km/s in ``v_z``.
-RP-1's -250 V sheath accelerates argon to 34.9 km/s. :meth:`~vpl.instruments.lif.
-instrument.LifInstrument.is_informative` therefore returns ``False`` at RP-1 and
-:meth:`~vpl.inverse.fusion.JointLikelihood.detail` names LIF in ``excluded``. Nothing here
-overrides that — doc 01 IF-6 is explicit that a blind channel contributes no term rather
-than a weak one — so **connecting LIF does not by itself fix a run at RP-1's bias.** The
-two honest routes are a lower wall bias (the gate opens below roughly 127 V for argon at
-``T_i`` = 0.05 eV) or a refinement of that gate inside ``vpl-instruments``: it compares the
-free-fall speed across the *whole* sheath drop against the ceiling regardless of where the
-measurement volume sits, so a sheath-edge volume, where the drift is only the Bohm speed,
-is refused along with a wall volume where the refusal is correct. That refinement is not
-made here because this module does not own that package.
+**1. The RP-1 tuning-range blocker — found here, since fixed upstream, and the fix carries
+its own hazard.** doc 01 §5.1 and doc 14 RS-03 give the laser a 20 GHz mode-hop-free range,
+which with doc 02 §4.2's 15 degree grazing geometry is a hard ceiling of 25.8 km/s in
+``v_z``, and RP-1's -250 V sheath accelerates argon to 34.9 km/s. When this module was
+written, :meth:`~vpl.instruments.lif.instrument.LifInstrument.is_informative` anchored its
+gate on that full free-fall speed, so it returned ``False`` at RP-1, the fusion layer
+excluded LIF by name, and **connecting the channel did nothing at the operating point the
+project actually cares about** — the joint likelihood was OES alone, wearing two channels'
+clothes. Nothing here overrode it, because doc 01 IF-6 is explicit that a blind channel
+contributes no term rather than a weak one.
+
+That gate has since been re-anchored, in ``vpl-instruments``, at the **sheath-edge Bohm
+speed**, on doc 01 §5.1's own stated mitigation: measure at the edge, where the drift is
+order ``c_s`` and the Doppler shift is comfortably reachable, and *propagate* to the wall
+rather than pretending the wall IVDF is directly measurable. LIF is now informative at
+RP-1 and both channels contribute there.
+
+**The hazard the fix introduces, and the reason this module pins ``lif_z_index``.** The
+same change made ``LifInstrument._resolve_z_index`` default the measurement volume to the
+sheath-edge node *of whatever state it is handed*. That node moves with ``theta``: measured
+across the region a MAP search explores, it comes out at index 3, 2 or 1 depending on
+``n_0`` and ``T_e``. A measurement volume that relocates with the trial parameters is a
+**theta-dependent observation location** — the identical class of inverse crime
+:mod:`vpl.experiment.closed_loop`'s module docstring documents for the spatial grid, where
+it produced a 15-20 % error and reported ``converged=True``. Comparing a trial's scan
+against the truth's scan point by point then compares two different physical positions, and
+the optimiser can reduce the residual by relocating the volume instead of by finding the
+right parameters. So :func:`build_channels` always passes an explicit ``lif_z_index`` and
+never lets the default resolve per state, exactly as ``_fixed_spatial_grid`` sizes one grid
+from the reference and reuses it for every trial. ``test_the_measurement_volume_is_pinned_
+and_does_not_move_with_theta`` is what stops that being quietly simplified away.
 
 **2. At the registered nominal beam the channel is saturation-broadened past uselessness,
 so the beam is attenuated here and the attenuation is declared.** ``lif.yaml``'s laser
@@ -562,13 +579,24 @@ def build_channels(
             explicit that its output is not a complete synthetic measurement.
         imperfect_calibration: Whether both truth instruments apply the doc 04 §7.3
             estimated response rather than the true one.
-        lif_z_index: Which spatial grid point the LIF measurement volume sits at. Defaults
-            to the outermost point — the sheath edge, where the drift is the Bohm speed.
-            That is the only place a 20 GHz laser can reach at any interesting wall bias
-            (see the module docstring's first finding), and it is also where the drift
-            carries ``sqrt(T_e)`` and the amplitude carries ``n_0`` in a combination the
-            OES line does not form. Index 0 is the wall and is doc 01 §1.1's deliverable,
-            but at RP-1 it is 34.9 km/s of drift and unreachable.
+        lif_z_index: Which spatial grid point the LIF measurement volume sits at.
+
+            Defaults to the outermost point, where the L0 profile has relaxed to the
+            quasineutral presheath and the drift is exactly the Bohm speed. Two reasons,
+            and the first is the load-bearing one. **It is a fixed index, resolved once
+            here rather than per state**, which is what keeps the observation location
+            independent of the trial ``theta`` — see the module docstring's first finding
+            for the inverse crime that the instrument's own per-state default would
+            otherwise walk into. Second, ``c_s`` carries ``sqrt(T_e)`` with no ``n_0`` in
+            it while the amplitude carries ``n_0`` with no ``T_e``, which is precisely the
+            separation the OES emission rate does not provide and the reason this channel
+            breaks the degeneracy at all.
+
+            Index 0 is the wall and is doc 01 §1.1's deliverable, but the wall IVDF is not
+            directly measurable here at any interesting bias — 34.9 km/s of drift at RP-1
+            against a 25.8 km/s ceiling. doc 01 §5.1's mitigation is to propagate the
+            sheath-edge distribution to the wall through the reconstructed field, and doc
+            06 §4 makes that propagation's error a budgeted term rather than a silent one.
     """
     # Imported here, not at module scope: the closed loop is expected to import *this*
     # module once the fusion is wired in, and a module-level import in both directions is

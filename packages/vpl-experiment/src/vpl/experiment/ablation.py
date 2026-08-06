@@ -28,19 +28,60 @@ change to any of those propagates here rather than drifting apart from it.
 
 ## The operating point this experiment must run at, and why
 
-:mod:`vpl.experiment.channels`'s own module docstring records the finding that decides
-this: **at RP-1's -250 V wall bias, LIF declares itself blind** (doc 01 §5.1, doc 14
+:mod:`vpl.experiment.channels`'s own module docstring recorded the finding that motivated
+this: **at RP-1's -250 V wall bias, LIF used to declare itself blind** (doc 01 §5.1, doc 14
 RS-03 — a 20 GHz mode-hop-free laser range is a 25.8 km/s ceiling in ``v_z``, and a 250 V
-argon sheath is 34.9 km/s). :class:`~vpl.inverse.fusion.JointLikelihood` then excludes LIF
-from the sum entirely (doc 01 IF-6), so "both channels" at RP-1 *is* "OES alone" — dropping
-LIF there would change nothing, and an ablation figure built at that bias would show two
-identical bars that read as "LIF carries no information", which is the opposite of what
-:mod:`vpl.experiment.channels` found. So :func:`run_ablation` runs at
-:data:`REACHABLE_BIAS_V`, the same reduced bias ``test_channels.py`` uses (for
-comparability — that file is where the value's provenance is worked out in full), and
-:func:`run_rp1_baseline` runs the *unmodified* RP-1 configuration as a separate, explicit
-datapoint specifically so the blindness in the module docstring above is visible in this
-experiment's own output rather than hidden by the choice of operating point.
+argon sheath drives the free-fall speed *at the wall* to 34.9 km/s, past that ceiling).
+:class:`~vpl.inverse.fusion.JointLikelihood` excluded LIF from the sum entirely (doc 01
+IF-6), so "both channels" at RP-1 *was* "OES alone" — dropping LIF there would have changed
+nothing, and an ablation figure built at that bias alone would have shown two identical
+bars that read as "LIF carries no information", which is the opposite of what
+:mod:`vpl.experiment.channels` found. That is why :func:`run_ablation` runs its main sweep
+at :data:`REACHABLE_BIAS_V` rather than RP-1's own bias, and why :func:`run_rp1_baseline`
+exists as a second, separate datapoint at RP-1 itself.
+
+**RP-1's blindness, past tense.** ``vpl-instruments`` has since re-anchored
+:meth:`~vpl.instruments.lif.instrument.LifInstrument._expected_ion_speed`'s tuning-range
+gate at the sheath-edge Bohm speed (``c_s`` plus a margin of thermal widths) rather than the
+free-fall speed across the *whole* sheath drop, and
+:meth:`~vpl.instruments.lif.instrument.LifInstrument._resolve_z_index` now defaults the
+measurement volume to the sheath edge to match — exactly the refinement
+``channels.py``'s own module docstring named as the honest route to a fix ("a refinement of
+that gate inside ``vpl-instruments``... not made here because this module does not own that
+package"). The consequence for :func:`run_rp1_baseline`: LIF is now informative at RP-1
+too, both channels contribute, and that function's row demonstrates a genuine two-channel
+fusion at the operating point doc 01 §1.1 actually specifies as the deliverable — a more
+useful datapoint than the blindness it used to report, not a less useful one.
+
+**:data:`REACHABLE_BIAS_V` stays as the main sweep's operating point regardless**, for a
+reason that has nothing to do with blindness any more: doc 11 §9 item 6's headline numbers
+this module has already produced (the seed 7/11/23 table, the seed 23 ~650x interval
+inflation, the LIF-likelihood coherent-calibration defect below) were all measured at -100
+V, and moving the sweep to RP-1 now would silently invalidate every one of them rather than
+extend the experiment — a reader comparing "the sweep" before and after this change would be
+comparing two different experiments under one name. Re-pointing :func:`run_ablation` at
+RP-1 now that it is reachable there too is a reasonable next step, but it is a deliberate
+follow-up with its own fresh seed sweep, not a change folded into this pass.
+
+## Why the LIF measurement volume does not move with theta here
+
+``_resolve_z_index``'s new sheath-edge default (above) is state-dependent: left to resolve
+itself, it locates the sheath edge in *whatever* ``PlasmaState`` it is handed, and across
+the region a MAP search here actually explores that resolved index changes with the trial
+``n_0``/``T_e`` — a **theta-dependent observation location**, the same class of inverse
+crime ``closed_loop.py``'s own module docstring documents at length for the spatial grid,
+where it let a trial `theta` improve its score by aligning grid points to the truth rather
+than by being closer to it, and reported ``converged=True`` while doing so. This module
+never hits that failure mode, and not by chance: :func:`~vpl.experiment.channels.
+build_channels` always resolves an explicit ``z_index`` before configuring either LIF
+instrument (:func:`~vpl.experiment.channels._lif_instrument`'s ``z_index`` argument), so
+``settings.z_index is not None`` holds for every state this module's likelihoods ever
+score and ``_resolve_z_index`` returns that one fixed index regardless of the state handed
+to it. The pin happens once, in :func:`_prepare`, off the reference state — never per
+trial — and every configuration in a sweep inherits it unchanged. Anyone tempted to
+"simplify" a future version of this module by dropping the explicit index and letting
+``LifInstrument`` resolve its own measurement volume per state would reopen exactly this
+crime.
 
 ## What "contributing" and "excluded" mean here, and why both are reported
 
@@ -48,11 +89,14 @@ An ablation configuration built with :meth:`~vpl.inverse.fusion.JointLikelihood.
 has physically removed a channel: the joint likelihood built from it only ever had one
 channel to ask, and :class:`~vpl.inverse.fusion.FusionDetail` reports that channel alone,
 with nothing excluded. :func:`run_rp1_baseline`'s configuration is different in kind: it
-*asks* for both channels and the fusion layer excludes one anyway, because the channel
-reports itself below its detection floor (doc 01 IF-6). Reporting only ``contributing``
-would make the two cases look identical; :class:`AblationResult` carries both fields
-because doc 01 IF-6 requires "a configuration nominally containing two channels but running
-on one" to say so, not just to run correctly.
+*asks* for both channels and lets the fusion layer decide, rather than pre-deciding by
+construction — so an instrument reporting itself below its detection floor (doc 01 IF-6)
+would show up there as an exclusion rather than an absent row. Both channels currently
+contribute at RP-1 (see "RP-1's blindness, past tense" above), so today
+``run_rp1_baseline().excluded == ()``; :class:`AblationResult` still carries the field
+rather than reporting only ``contributing``, because doc 01 IF-6 requires "a configuration
+nominally containing two channels but running on one" to say so *if it ever happens again*,
+not just to run correctly while it does not.
 
 ## What a widened interval does and does not show
 
@@ -63,6 +107,44 @@ channel cannot break). It is not, by itself, evidence that the dropped channel's
 correctly modelled — the same caveats ``channels.py`` states about the reconstructed IVDF
 and the independence assumption ``fusion.py`` states apply here unchanged, because this
 module fuses through exactly those two objects rather than around them.
+
+**Seed 23 is this sweep's clearest result, and it should be read first.** At
+``REACHABLE_BIAS_V`` and ``seed=23``, dropping LIF (``without oes``'s complement — i.e. the
+``all channels`` -> ``without lif`` step) inflates the ``Gamma_E`` interval from ~12.9 to
+~8449 W/m^2, a ~650x widening, while the two-channel configuration holds it at ~12.9 and
+the relative error at 0.008 against ``without lif``'s 0.069. That is the ``n_0``-``T_e``
+ridge collapse doc 11 §9 item 3 predicts for an OES-only recovery, caught exactly where the
+project's own diagnosis says it should be, and it is the sweep's single most direct
+demonstration that connecting LIF was worth doing.
+
+**Seeds 7 and 11 do not show the same direction for the *baseline*, and the cause is
+measured, not guessed.** At those seeds the two-channel configuration's relative error and
+interval width are both *worse* than one or both single-channel configurations, and
+coverage fails for ``all channels`` in every seed tried (7, 11, 23). The cause is a defect
+in :meth:`~vpl.instruments.lif.instrument.LifInstrument.likelihood`, not in this module or
+in :mod:`vpl.inverse.fusion`: ``LifInstrument.observe`` draws **one** calibration scale and
+applies it to every one of the 201 scan points — correct, and doc 06 §4.1's point that a
+correlated calibration error "does not average down" — but ``LifInstrument.likelihood``
+then divides by a **diagonal** per-point uncertainty with no coherent term, so that single
+shared draw is charged as 201 independent residuals rather than one. Measured directly at
+``seed=7``'s truth: the per-point residuals from that draw are constant across the scan to
+machine precision (ratio standard deviation ~2e-16), the diagonal scoring gives
+chi-squared ~3.0e-4, and the same draw scored as the one coherent degree of freedom it
+actually is gives chi-squared ~1.5e-6 — an overweighting factor of ~201, matching the scan's
+own point count exactly. Rerunning the ``all channels`` recovery at ``seed=7`` with
+``build_channels(..., imperfect_calibration=False)`` — i.e. with that one draw removed —
+drops the relative error from 0.0094 to 0.00027, confirming the direction: LIF's evidence
+is entering the joint sum roughly 201x too strongly, so the fit chases that seed's
+particular calibration draw instead of the physics.
+
+This is fixable, and the fix is visible by comparison:
+:meth:`~vpl.instruments.oes.instrument.OesInstrument.likelihood` already accepts a
+``coherent_discrepancy`` argument that turns a diagonal Gaussian into the rank-one
+correlated one a systematic error needs (see its own docstring for why the diagonal form
+"average[s] down as ``1/sqrt(n)``" and under-inflates); ``LifInstrument.likelihood`` has no
+equivalent parameter. That fix belongs in ``vpl-instruments``, which this module does not
+own and does not touch — it is recorded here, at the ablation this defect distorts, rather
+than attempted.
 """
 
 from __future__ import annotations
@@ -405,11 +487,18 @@ def run_rp1_baseline(
 ) -> AblationResult:
     """RP-1's own wall bias, both channels nominally requested, no channel dropped.
 
-    Not an ablation in the doc 11 §9 item 6 sense — see the module docstring. Its purpose
-    is narrower and specific: to make ``vpl.experiment.channels``'s blindness finding a
-    checked datapoint in *this* module's own output, so that :data:`REACHABLE_BIAS_V`'s
-    choice for :func:`run_ablation` reads as a stated experimental design decision rather
-    than a silent one. ``result.excluded == (lif,)`` here is the evidence.
+    Not an ablation in the doc 11 §9 item 6 sense — see the module docstring. Originally
+    this function existed to make ``vpl.experiment.channels``'s RP-1 blindness finding a
+    checked datapoint in *this* module's own output — ``result.excluded == (lif,)`` was the
+    evidence, and it was what justified :data:`REACHABLE_BIAS_V` as a stated experimental
+    design decision for :func:`run_ablation` rather than a silent one. See the module
+    docstring's "RP-1's blindness, past tense" for why that is no longer what this function
+    demonstrates: ``vpl-instruments`` has since re-anchored LIF's tuning-range gate at the
+    sheath edge, both channels are informative at RP-1 now, and this row instead
+    demonstrates a genuine two-channel fusion at the operating point doc 01 §1.1 specifies
+    as the actual deliverable. :data:`REACHABLE_BIAS_V` remains :func:`run_ablation`'s
+    operating point regardless, for the comparability reason the same module docstring
+    section gives.
     """
     prepared = _prepare(seed=seed, wall_bias_v=None, registry=registry)
     return _recover(prepared, joint=prepared.joint, label=RP1_LABEL, credible_level=credible_level)
