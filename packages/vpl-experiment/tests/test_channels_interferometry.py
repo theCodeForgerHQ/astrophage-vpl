@@ -1,18 +1,23 @@
 """What :mod:`vpl.experiment.channels_interferometry` must be true for — doc 04 §5.1,
-doc 05 §3.2, doc 11 §9 item 3.
+doc 05 §3.2, doc 02 §8.3, doc 11 §9 item 3.
 
-Three things this file exists to pin down, each a finding the module docstring states in
+This channel was reframed from an 8-chord sheath sampler to a single bulk-density line
+integral (see the module docstring under test for the full finding and the reasoning).
+Four things this file exists to pin down, each a claim the module docstring states in
 prose:
 
-1. The chord ladder does not move with theta — ``TestChordGeometryDoesNotDependOnTheta`` is
-   the guard the module docstring names.
-2. The closed loop's fixed observation grid is far shorter than the chord ladder's 35 mm
-   span — ``TestGridDomainVsChordSpanFinding`` pins the measured extent so a later change to
-   either number cannot silently un-measure it.
-3. ``calibration_uncertainty`` (Task 3's amendment) reaches
-   :meth:`~vpl.instruments.interferometry.instrument.InterferometryInstrument.likelihood`
-   through :class:`~vpl.inverse.fusion.JointLikelihood`'s fixed two-positional-argument call
-   shape — ``TestCalibrationUncertaintyAdapter``.
+1. The observable tracks ``n_0`` and is blind to the sheath's own shape —
+   ``TestObservableIsABulkMeasurementNotASheathSample`` and
+   ``TestDensitySensitivityAndTemperatureBlindness``.
+2. The doc 01 IF-6 detection floor still gates the channel off at low density —
+   ``TestDetectionFloorStillGates`` and
+   ``TestFusionIntegration.test_a_plasma_below_the_detection_floor_is_excluded_by_name_not_
+   scored_as_noise``.
+3. The chord geometry — now a single fixed path length rather than an 8-element ladder —
+   still does not move with theta — ``TestChordGeometryDoesNotDependOnTheta``.
+4. ``calibration_uncertainty`` (Task 3's amendment) still reaches the instrument through
+   :class:`~vpl.inverse.fusion.JointLikelihood`'s fixed two-positional-argument call shape
+   — ``TestCalibrationUncertaintyAdapter``.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ from vpl.experiment.closed_loop import (
     _reference_theta,
     _to_plasma_params,
 )
-from vpl.instruments.interferometry.phase import CHORD_SPACING_M, N_CHORDS
+from vpl.instruments.interferometry.phase import CHAMBER_DIAMETER_M
 from vpl.inverse.fusion import BlindChannelError, Channel, JointLikelihood
 from vpl.inverse.parameters import ControlParameters
 from vpl.inverse.priors import LogNormalPrior, LogUniformPrior
@@ -53,6 +58,11 @@ _SEED = 13
 #: point (rather than RP-1 in some and this bias in others) is what keeps the numbers in
 #: this file's docstrings comparable to each other.
 _OPERATING_BIAS_V = -100.0
+
+#: A wall bias far from ``_OPERATING_BIAS_V`` (RP-1's own reference point), used only to
+#: force a materially different sheath structure while holding ``n_0`` fixed — see
+#: ``TestObservableIsABulkMeasurementNotASheathSample``.
+_ALTERNATE_BIAS_V = -250.0
 
 
 def _solver() -> AnalyticSheathSolver:
@@ -116,11 +126,10 @@ def _noiseless_channel() -> InterferometryChannel:
 
 class TestTheStandaloneHelpers:
     def test_interferometry_calibration_set_has_the_phase_scale_standard(self) -> None:
-        # Reads the registry rather than pinning a number. The previous version asserted a
-        # literal 0.005, which was an invented value — six times tighter than doc 02 §11's
-        # only figure, and tighter in the direction that flattered this channel. Pinning a
-        # literal here is what let that survive; the entry is now ASSUMED in the register
-        # with a retirement path, and this test follows it wherever it goes.
+        # Reads the registry rather than pinning a number. IF.phase_scale_uncertainty is
+        # ASSUMED-class (0.03) with a stated retirement path; this test follows it
+        # wherever it goes rather than hardcoding a value that could silently drift out of
+        # sync with the registry.
         registry = default_registry()
         refs = interferometry_calibration_set(registry)
         standard = refs.for_quantity("interferometer_phase_scale")
@@ -141,21 +150,35 @@ class TestTheStandaloneHelpers:
 
 
 class TestBuildDefaults:
-    def test_start_z_m_defaults_to_the_wall(self, channel: InterferometryChannel) -> None:
-        assert channel.start_z_m == 0.0
+    def test_chord_length_m_is_the_doc_02_8_2_chamber_diameter(
+        self, channel: InterferometryChannel
+    ) -> None:
+        # doc 02 §8.2 IF-P2: the chord length is the chamber diameter, a fixed machine
+        # dimension, not a fitted parameter — see the module docstring under test. This is
+        # the same `CHAMBER_DIAMETER_M` the (unedited) physics module already names.
+        assert channel.chord_length_m == pytest.approx(CHAMBER_DIAMETER_M)
 
-    def test_start_z_m_is_configurable_and_reflected_in_the_resolved_field(self) -> None:
+    def test_start_z_m_is_accepted_but_no_longer_moves_anything(self) -> None:
+        # `start_z_m` has no chord ladder left to anchor (see the module docstring's
+        # reframing) but is kept in `build_interferometry_channel`'s signature because
+        # `vpl.experiment.channels.build_channels` calls it by keyword and is out of scope
+        # for this change. This is the checked claim that supplying a value does nothing,
+        # rather than a comment asserting it.
+        default = build_interferometry_channel(
+            reference_state=_reference_state(), seed=_SEED, registry=default_registry()
+        )
         moved = build_interferometry_channel(
             reference_state=_reference_state(),
             seed=_SEED,
             registry=default_registry(),
-            start_z_m=0.01,
+            start_z_m=0.02,
         )
+        state = _state(_operating_theta())
 
-        assert moved.start_z_m == pytest.approx(0.01)
-        np.testing.assert_allclose(
-            moved.inversion.instrument.chord_positions_m(),
-            0.01 + CHORD_SPACING_M * np.arange(N_CHORDS),
+        assert moved.chord_length_m == pytest.approx(default.chord_length_m)
+        np.testing.assert_array_equal(
+            moved.inversion.forward(state, moved.window).values,
+            default.inversion.forward(state, default.window).values,
         )
 
     def test_the_window_matches_the_registered_vibration_reference_window(
@@ -183,21 +206,23 @@ class TestBuildDefaults:
 
 
 class TestChordGeometryDoesNotDependOnTheta:
-    """The trap this module's docstring names: interferometry integrates along chords
-    rather than sampling one node, so the same class of theta-dependent-observation inverse
+    """The trap the module docstring names: the old 8-chord ladder integrated along fixed
+    positions rather than sampling one node, so the theta-dependent-observation inverse
     crime ``closed_loop.py`` documents for the spatial grid, and
-    ``vpl.experiment.channels`` documents for LIF's default ``z_index``, had to be ruled out
-    here by reading the code rather than assumed away by analogy.
+    ``vpl.experiment.channels`` documents for LIF's default ``z_index``, had to be ruled
+    out here by reading the code rather than assumed away by analogy. The reframing to a
+    single bulk line integral does not relax that requirement — the chord length is still
+    fixed machine geometry (doc 02 §8.2 IF-P2), and this test is the checked guard that it
+    stays that way rather than starting to depend on the trial state's own fields.
 
-    It is ruled out structurally: ``InterferometryInstrument.chord_positions_m`` takes no
-    ``state`` argument at all, so there is nothing here for a trial ``theta`` to move. This
-    test evaluates ``forward`` at several materially different thetas spanning
-    ``_reduced_prior``'s full range and checks the chord ladder is bit-for-bit identical
-    before and after — so this is a checked property of the code, not a claim resting on
-    having read it once.
+    Ruled out structurally: :attr:`InterferometryChannel.chord_length_m` is a resolved
+    Python float that never reads ``state`` at all, so there is nothing here for a trial
+    ``theta`` to move. This test evaluates ``forward`` at several materially different
+    thetas spanning ``_reduced_prior``'s full range and checks the geometry is bit-for-bit
+    identical before and after.
     """
 
-    def test_chord_positions_are_identical_before_and_after_forward_across_the_map_search_region(
+    def test_chord_length_is_identical_before_and_after_forward_across_the_map_search_region(
         self, channel: InterferometryChannel
     ) -> None:
         n0_low, n0_high, te_median, te_log_sigma = _map_search_bounds()
@@ -210,33 +235,58 @@ class TestChordGeometryDoesNotDependOnTheta:
             reference.replace(T_e=te_median * math.exp(-3.0 * te_log_sigma)),
         ]
 
-        before = channel.inversion.instrument.chord_positions_m().copy()
+        before = channel.inversion.instrument.chord_length_m
         for theta in thetas:
             channel.inversion.forward(_state(theta), channel.window)
-        after = channel.inversion.instrument.chord_positions_m()
+        after = channel.inversion.instrument.chord_length_m
 
-        np.testing.assert_array_equal(before, after)
+        assert before == after
 
 
-class TestGridDomainVsChordSpanFinding:
-    """Measured finding, pinned as a regression check — see the module docstring's "grid
-    domain" section. ``start_z_m`` is deliberately not moved and the chord spacing is
-    deliberately not shrunk to make this look better; IF-G1's 5 mm spacing is doc 02 §8.2's
-    hardware specification, not a knob this module owns.
+class TestObservableIsABulkMeasurementNotASheathSample:
+    """The finding that motivated the reframing: against the closed loop's 0-2.28 mm
+    observation grid, the old 8-chord-at-5-mm ladder put seven of its eight chords past the
+    grid's edge, where ``np.interp`` clamped them to the outermost node's density — "eight
+    independent line integrals" degenerating into one interior reading plus seven repeats
+    of the same clamped value. That pathology cannot recur here: the observable below never
+    reads the spatial grid, the density field, or the chord ladder at all. It is
+    ``r_e * lambda * n_0 * L`` — the doc 04 §5.1 phase evaluated at the bulk density the
+    solver treats as the sheath problem's own boundary condition (doc 02 §8.3), over the
+    fixed chord length. Both properties below are checked directly rather than argued from
+    the formula.
     """
 
-    def test_the_fixed_observation_grid_is_shorter_than_the_full_chord_ladder(self) -> None:
-        registry = default_registry()
-        species = _argon_ion(registry)
-        solver = _solver()
-        grid = _fixed_spatial_grid(
-            solver, reference=_reference_theta(), species=species, registry=registry
-        )
-        chord_z = CHORD_SPACING_M * np.arange(N_CHORDS)
+    def test_forward_returns_one_value_not_eight_clamped_chords(
+        self, channel: InterferometryChannel
+    ) -> None:
+        state = _state(_operating_theta())
 
-        assert grid.z_m[-1] < chord_z[-1]
-        inside = int(np.sum(chord_z <= grid.z_m[-1]))
-        assert inside == 1
+        predicted = channel.inversion.forward(state, channel.window)
+
+        assert predicted.values.shape == (1,)
+
+    def test_the_observable_is_unchanged_across_wildly_different_sheath_profiles_at_fixed_n_0(
+        self,
+    ) -> None:
+        # Same n_0, very different bias -> very different sheath thickness and z-profile
+        # shape (the presheath solved by AnalyticSheathSolver looks nothing alike at -100 V
+        # vs -250 V), but the bulk boundary condition n_0 is untouched by V_w. A channel
+        # that still depended on the sheath's own shape would move here; this one must not.
+        noiseless = _noiseless_channel()
+        near_wall_theta = _operating_theta()
+        far_wall_theta = near_wall_theta.replace(V_w=_ALTERNATE_BIAS_V)
+        assert near_wall_theta.n_0 == far_wall_theta.n_0
+
+        near_state = _state(near_wall_theta)
+        far_state = _state(far_wall_theta)
+        # Sanity check that the two states really do have different sheath structure, so
+        # an unchanged observable below is evidence of insensitivity and not a fixture bug.
+        assert not np.allclose(near_state.field("n_e").values, far_state.field("n_e").values)
+
+        near_phase = noiseless.inversion.forward(near_state, noiseless.window)
+        far_phase = noiseless.inversion.forward(far_state, noiseless.window)
+
+        np.testing.assert_array_equal(near_phase.values, far_phase.values)
 
 
 class TestForwardNeverRaisesAcrossTheMapSearchRegion:
@@ -267,14 +317,39 @@ class TestForwardNeverRaisesAcrossTheMapSearchRegion:
                 assert np.all(np.isfinite(observed.values))
 
 
+class TestDetectionFloorStillGates:
+    """doc 01 IF-6: reframing what the channel measures must not remove the requirement
+    that it declares itself blind below its floor. ``detection_floor_n_e_per_m3`` is the
+    same (unedited) formula as before, evaluated over the same chord length, so the floor
+    value is unchanged — this is the direct, single-channel check;
+    ``TestFusionIntegration`` below checks the same gate through the full fused likelihood.
+    """
+
+    def test_is_informative_is_false_below_the_prior_lower_bound(
+        self, channel: InterferometryChannel
+    ) -> None:
+        n0_low, _n0_high, _te_median, _te_log_sigma = _map_search_bounds()
+        blind_state = _state(_operating_theta().replace(n_0=n0_low))
+
+        assert channel.inversion.is_informative(blind_state.params) is False
+
+    def test_is_informative_is_true_at_the_reference_density(
+        self, channel: InterferometryChannel
+    ) -> None:
+        reference_state = _reference_state()
+
+        assert channel.inversion.is_informative(reference_state.params) is True
+
+
 class TestDensitySensitivityAndTemperatureBlindness:
-    """doc 04 §5.1: the phase depends on ``n_e`` alone. Measured directly, not assumed: a
-    6 % change in ``n_0`` moves this channel's log-likelihood by O(1); a comparable change
-    in ``T_e`` moves it by less than the double-precision noise floor of the sum itself —
-    against this grid (see ``TestGridDomainVsChordSpanFinding``), the seven clamped chords
-    report a presheath density this L0 solver sets from ``n_0`` alone (the Bohm-criterion
-    presheath fraction), and the one interior chord's genuine ``T_e`` dependence lives at an
-    absolute density many orders of magnitude below the bulk value it is compared against.
+    """doc 04 §5.1: the phase depends on ``n_e`` alone, and under the bulk reframing that
+    is ``n_0`` alone — ``n_g`` (the neutral correction, doc 04 §5.2) depends on pressure and
+    ``T_g``, never on ``T_e``. Measured directly, not assumed: a 6 % change in ``n_0``
+    moves this channel's log-likelihood by a materially non-zero amount, and a comparable
+    change in ``T_e`` moves it by exactly zero, bit for bit, because ``_predict`` never
+    reads ``T_e`` at all — a stronger, more direct claim than the old chord ladder could
+    make (there, chord 0's genuine T_e-via-presheath-fraction dependence was real, just
+    small; here there is no code path from ``T_e`` to the prediction whatsoever).
     """
 
     def test_the_likelihood_moves_for_a_six_percent_change_in_n_0(self) -> None:
@@ -291,10 +366,10 @@ class TestDensitySensitivityAndTemperatureBlindness:
             observed, noiseless.inversion.forward(denser_state, noiseless.window)
         )
 
-        # Observed directly: ~0.92 log-probability units at this operating point.
+        # Observed directly: ~0.26 log-probability units at this operating point.
         assert ll_truth - ll_denser > 0.1
 
-    def test_the_likelihood_is_essentially_unmoved_by_a_comparable_change_in_t_e(self) -> None:
+    def test_the_likelihood_is_bit_for_bit_unmoved_by_a_comparable_change_in_t_e(self) -> None:
         noiseless = _noiseless_channel()
         theta = _operating_theta()
         truth_state = _state(theta)
@@ -308,13 +383,13 @@ class TestDensitySensitivityAndTemperatureBlindness:
             observed, noiseless.inversion.forward(hotter_state, noiseless.window)
         )
 
-        assert abs(ll_truth - ll_hotter) < 1.0e-6
+        assert ll_truth == ll_hotter
 
 
 class TestCalibrationUncertaintyAdapter:
-    """Task 3's amendment: ``calibration_uncertainty`` must reach
-    ``InterferometryInstrument.likelihood`` through ``JointLikelihood``'s fixed
-    ``likelihood(obs, pred)`` call shape, via ``_InterferometryWithOptionalCoherence``.
+    """Task 3's amendment: ``calibration_uncertainty`` must reach the underlying
+    instrument's ``likelihood`` through ``JointLikelihood``'s fixed ``likelihood(obs,
+    pred)`` call shape.
     """
 
     def test_default_channel_is_bit_for_bit_identical_to_the_raw_instrument_with_the_flag_off(
@@ -363,9 +438,8 @@ class TestCalibrationUncertaintyAdapter:
     ) -> None:
         # build_interferometry_channel() always calls calibrate() on the inversion
         # instrument (so the standard's registered uncertainty is on record) *and*
-        # use_true_calibration() (so its predictions stay exact) — see the module
-        # docstring's "Scoring the calibration coherently" section for why both are
-        # necessary. This is the check that the combination actually works end to end.
+        # use_true_calibration() (so its predictions stay exact). This is the check that
+        # the combination actually works end to end.
         with_coherence = build_interferometry_channel(
             reference_state=_reference_state(),
             seed=_SEED,
@@ -380,17 +454,17 @@ class TestCalibrationUncertaintyAdapter:
 
         assert math.isfinite(result)
 
-    def test_the_wrapped_instrument_is_reachable_for_metadata_and_chord_positions(
+    def test_the_wrapped_instrument_is_reachable_for_metadata_and_chord_length(
         self, channel: InterferometryChannel
     ) -> None:
-        assert channel.inversion.instrument.chord_positions_m().size == N_CHORDS
+        assert channel.inversion.instrument.chord_length_m == pytest.approx(CHAMBER_DIAMETER_M)
         assert channel.inversion.instrument.metadata().instrument_id == INTERFEROMETRY_CHANNEL
 
 
 class TestFusionIntegration:
     """The adapter must satisfy :mod:`vpl.inverse.fusion`'s structural instrument protocol
-    directly — unlike LIF, this channel needs no reconstructed velocity distribution, so the
-    only reason it carries an adapter at all is Task 3's ``calibration_uncertainty`` flag.
+    directly — this channel needs no reconstructed velocity distribution, so the only
+    reason it carries an adapter at all is Task 3's ``calibration_uncertainty`` flag.
     """
 
     def test_the_channel_scores_through_joint_likelihood(
