@@ -28,7 +28,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -54,7 +54,7 @@ __all__ = [
     "tabulate_electron_sets",
 ]
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 
 class TabulatedQuantity(StrEnum):

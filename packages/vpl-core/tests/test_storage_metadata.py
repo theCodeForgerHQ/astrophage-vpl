@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
 import numpy as np
 import pytest
@@ -151,8 +151,8 @@ class _Archived(Protocol):
     def provenance(self) -> Provenance: ...
 
 
-type _Write = Callable[[Path, Provenance], object]
-type _Read = Callable[[Path], _Archived]
+_Write: TypeAlias = Callable[[Path, Provenance], object]
+_Read: TypeAlias = Callable[[Path], _Archived]
 
 #: ``(label, write, read)`` for every artifact doc 08 §7 tabulates.
 _WRITERS: tuple[tuple[str, _Write, _Read], ...] = (

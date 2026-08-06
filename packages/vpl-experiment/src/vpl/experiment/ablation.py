@@ -216,6 +216,19 @@ _TIER: Final[Tier] = Tier.T1
 #: Configuration labels, named so an ablation table and a test assertion cannot drift by
 #: one of them being retyped slightly differently.
 BASELINE_LABEL: Final[str] = "all channels"
+
+
+def without_label(channel: str) -> str:
+    """The label for the row that drops ``channel``.
+
+    One function rather than one constant per channel: the set grew from two to four and
+    doc 11 §9 item 6 asks for a row per channel, so a per-name constant would have to be
+    remembered and added every time a channel is connected — exactly the kind of omission
+    that turns "we ablated every channel" into a claim nobody checked.
+    """
+    return f"without {channel}"
+
+
 WITHOUT_LIF_LABEL: Final[str] = f"without {LIF_CHANNEL}"
 WITHOUT_OES_LABEL: Final[str] = f"without {OES_CHANNEL}"
 RP1_LABEL: Final[str] = "RP-1 nominal (both requested)"
@@ -457,26 +470,31 @@ def run_ablation(
             :func:`~vpl.core.params.default_registry`.
 
     Returns:
-        ``(baseline, without_lif, without_oes)``, in that order.
+        The baseline first, then one leave-one-out row per channel in
+        :data:`~vpl.experiment.channels.CHANNEL_NAMES` order.
     """
     prepared = _prepare(seed=seed, wall_bias_v=wall_bias_v, registry=registry)
 
-    baseline = _recover(
-        prepared, joint=prepared.joint, label=BASELINE_LABEL, credible_level=credible_level
+    # One row per channel rather than the two this function was written with. doc 11 §9
+    # item 6 asks for "drop *each* channel, show the CI inflate", and the channel set has
+    # since grown from two to four; hard-coding two names would have quietly turned "each"
+    # into "the two that existed when this was written" and silently stopped reporting the
+    # ablation for Thomson and interferometry — the channels the exercise was for.
+    results = [
+        _recover(
+            prepared, joint=prepared.joint, label=BASELINE_LABEL, credible_level=credible_level
+        )
+    ]
+    results.extend(
+        _recover(
+            prepared,
+            joint=prepared.joint.without(name),
+            label=without_label(name),
+            credible_level=credible_level,
+        )
+        for name in prepared.joint.names
     )
-    without_lif = _recover(
-        prepared,
-        joint=prepared.joint.without(LIF_CHANNEL),
-        label=WITHOUT_LIF_LABEL,
-        credible_level=credible_level,
-    )
-    without_oes = _recover(
-        prepared,
-        joint=prepared.joint.without(OES_CHANNEL),
-        label=WITHOUT_OES_LABEL,
-        credible_level=credible_level,
-    )
-    return (baseline, without_lif, without_oes)
+    return tuple(results)
 
 
 def run_rp1_baseline(

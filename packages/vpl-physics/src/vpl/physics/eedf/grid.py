@@ -42,7 +42,7 @@ the second-order argument for it is a proof and the one for quadratic is an expe
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Self
+from typing import Final, Self, TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -50,7 +50,7 @@ from numpy.typing import ArrayLike, NDArray
 __all__ = ["EnergyGrid"]
 
 #: A quantity sampled on the grid, in SI magnitudes except energies, which are eV.
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 #: Exponent of the geometric weight in :meth:`EnergyGrid.quadratic`.
 _QUADRATIC_EXPONENT: Final[float] = 2.0

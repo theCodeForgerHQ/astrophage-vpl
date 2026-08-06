@@ -12,7 +12,7 @@ posterior.
 
 from __future__ import annotations
 
-from typing import Any, cast, overload
+from typing import Any, TypeAlias, cast, overload
 
 import numpy as np
 import pint
@@ -30,7 +30,7 @@ __all__ = [
 ]
 
 #: What a quantity's magnitude may be: a plain float for a scalar, an array for a field.
-type Magnitude = float | NDArray[np.float64]
+Magnitude: TypeAlias = float | NDArray[np.float64]
 
 #: The single shared unit registry.
 #:
@@ -61,7 +61,7 @@ pint.set_application_registry(UREG)  # type: ignore[no-untyped-call]
 #: out is the usual one: **accept broadly, return precisely.** Parameters take
 #: :data:`Quantity`; returns are :data:`ScalarQuantity` or :data:`ArrayQuantity` wherever
 #: which one it is is a fact about the quantity rather than about one caller.
-type Quantity = pint.Quantity[Any]
+Quantity: TypeAlias = pint.Quantity[Any]
 
 #: A quantity whose magnitude is known to be a scalar.
 #:
@@ -70,10 +70,10 @@ type Quantity = pint.Quantity[Any]
 #: :func:`magnitude_in` return a plain ``float`` instead of a union the caller then has
 #: to narrow, and hand-narrowing at every call site is how a union type stops being
 #: checked at all.
-type ScalarQuantity = pint.Quantity[float]
+ScalarQuantity: TypeAlias = pint.Quantity[float]
 
 #: A quantity whose magnitude is known to be an array — a field, a grid, an axis.
-type ArrayQuantity = pint.Quantity[NDArray[np.float64]]
+ArrayQuantity: TypeAlias = pint.Quantity[NDArray[np.float64]]
 
 #: Quantity constructor bound to :data:`UREG`. ``Q_(5.0, "mTorr")``.
 Q_ = UREG.Quantity

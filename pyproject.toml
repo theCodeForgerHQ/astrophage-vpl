@@ -94,6 +94,20 @@ ignore = [
 # Tests are allowed magic numbers and long lines in tabulated expectations.
 "**/tests/**" = ["ARG001", "ARG002"]
 
+# vpl-core and vpl-physics carry `requires-python = ">=3.11,<3.13"` (see their
+# pyproject.toml and ADR-013): they are the two packages the L2 PIC benchmark needs, and
+# the only JAX build proven to work on the reference machine's RTX A4000 —
+# jaxlib 0.4.13+cuda11.cudnn86 — ships no wheel above cp311. So these two packages spell
+# type aliases as `X: TypeAlias = ...` and generics with an explicit `TypeVar`.
+#
+# That is not a downgrade: both spellings are fully valid on 3.12 and mypy resolves them
+# identically. The project loses nothing and gains a wider deployable range. UP040/UP047
+# would rewrite them back to `type X = ...` and `def f[T]`, which is 3.12-only syntax and
+# would put the packages back out of the working GPU environment, so both rules are off
+# *here only*. The other four packages stay at `>=3.12` and keep the rules enforced.
+"packages/vpl-core/**" = ["UP040", "UP047"]
+"packages/vpl-physics/**" = ["UP040", "UP047"]
+
 [tool.ruff.lint.pep8-naming]
 # Physics conventions: `T_e`, `n_0`, `V_w`, `Gamma_E` are correct names here.
 ignore-names = ["*_e", "*_i", "*_g", "*_w", "*_s", "*_D", "*_E", "*_L", "*_RF", "N_*", "T_*", "E_*"]

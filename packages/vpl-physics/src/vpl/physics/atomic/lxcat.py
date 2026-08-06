@@ -47,7 +47,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -64,7 +64,7 @@ __all__ = [
 ]
 
 #: A tabulated column, in SI magnitudes.
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 #: Relative agreement demanded between the two places LXCat states a threshold — the
 #: bare number under the reaction and the ``E = ... eV`` of the ``PARAM.:`` line. Files

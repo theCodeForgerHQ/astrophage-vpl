@@ -33,12 +33,19 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import TypeAlias
 
 __all__ = ["Config", "ConfigValue", "InstrumentConfig", "InverseConfig", "SolverConfig"]
 
 #: Anything a manifest block may hold once loaded from YAML — doc 08 §6.
-type ConfigValue = (
-    str | int | float | bool | Sequence[ConfigValue] | Mapping[str, ConfigValue] | None
+#:
+#: Quoted because the alias is *recursive*: the right-hand side names ``ConfigValue``
+#: before the assignment binds it. PEP 695's ``type`` statement evaluates lazily and hides
+#: that; a ``TypeAlias`` assignment is evaluated eagerly, so the forward reference has to
+#: be spelled as a string. This is the standard pre-695 form and mypy resolves it
+#: identically.
+ConfigValue: TypeAlias = (
+    "str | int | float | bool | Sequence[ConfigValue] | Mapping[str, ConfigValue] | None"
 )
 
 

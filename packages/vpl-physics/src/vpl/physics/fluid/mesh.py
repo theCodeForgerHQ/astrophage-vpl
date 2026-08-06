@@ -32,7 +32,7 @@ the interior with room to spare — which is the right direction to be conservat
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, TypeAlias
 
 import basix.ufl
 import numpy as np
@@ -58,7 +58,7 @@ __all__ = [
 ]
 
 #: A field sampled on a grid, in SI magnitudes.
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 _REGISTRY: Final = default_registry()
 

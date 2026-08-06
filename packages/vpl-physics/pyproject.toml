@@ -11,7 +11,16 @@ name = "vpl-physics"
 version = "0.1.0"
 description = "Astrophage VPL — the forward physics operator F1: analytic, fluid, kinetic and surrogate sheath models."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+# The L2 PIC benchmark this package feeds must run under the only JAX build proven to work
+# on the reference machine's RTX A4000 — jaxlib 0.4.13+cuda11.cudnn86, ADR-013 — and that
+# wheel exists only for cp38..cp311. The floor is 3.11, not 3.10: this package uses
+# `StrEnum`, `Self` and `datetime.UTC`, all 3.11 additions.
+#
+# Nothing is given up to get here. PEP 695 `type X = ...` was replaced by
+# `X: TypeAlias = ...` and `def f[T]` by an explicit `TypeVar`; both spellings are fully
+# valid on 3.12 and mypy resolves them identically, so this widens the deployable range
+# rather than downgrading it. The other four packages stay at `>=3.12`.
+requires-python = ">=3.11,<3.13"
 authors = [{ name = "Team Astrophage" }]
 dependencies = [
     "vpl-core",

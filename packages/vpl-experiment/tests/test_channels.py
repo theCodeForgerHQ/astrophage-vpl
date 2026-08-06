@@ -23,8 +23,11 @@ from vpl.core.params import default_registry
 from vpl.core.state import PlasmaState
 from vpl.core.units import magnitude_in
 from vpl.experiment.channels import (
+    CHANNEL_NAMES,
+    INTERFEROMETRY_CHANNEL,
     LIF_CHANNEL,
     OES_CHANNEL,
+    THOMSON_CHANNEL,
     ChannelSet,
     build_channels,
     reconstruct_ivdf,
@@ -91,32 +94,57 @@ def _joint_and_truth(channels: ChannelSet, truth_state: PlasmaState) -> JointLik
     return channels.joint(channels.observe(truth_state))
 
 
+def _only(joint: JointLikelihood, name: str) -> JointLikelihood:
+    """The joint likelihood ablated down to one named channel.
+
+    The set grew from two channels to four (Thomson and interferometry were connected for
+    the reason :mod:`vpl.experiment.channels`'s docstring gives: with honest calibration
+    uncertainty, OES's brightness scale and the plasma density are the same unknown). Every
+    "this channel alone" assertion below used to be spelled ``joint.without(the_other_one)``,
+    which silently became "three channels" when the set grew. Routing them through here
+    keeps each of those tests asking the question it was written to ask rather than a
+    weaker one that happens to still pass.
+    """
+    ablated = joint
+    for other in joint.names:
+        if other != name:
+            ablated = ablated.without(other)
+    return ablated
+
+
 class TestTheChannelSet:
-    def test_the_joint_likelihood_contains_both_channels_by_name(
+    def test_the_joint_likelihood_contains_every_channel_by_name(
         self, channels: ChannelSet, truth_state: PlasmaState
     ) -> None:
         joint = channels.joint(channels.observe(truth_state))
 
-        assert set(joint.names) == {OES_CHANNEL, LIF_CHANNEL}
+        assert joint.names == CHANNEL_NAMES
+        assert set(joint.names) == {
+            OES_CHANNEL,
+            LIF_CHANNEL,
+            THOMSON_CHANNEL,
+            INTERFEROMETRY_CHANNEL,
+        }
 
     def test_the_channel_names_match_what_the_instruments_stamp_on_their_output(
         self, channels: ChannelSet, truth_state: PlasmaState
     ) -> None:
         # OES's identifier is private in its own package and duplicated in channels.py;
-        # this is the check that keeps the duplicate honest.
+        # this is the check that keeps the duplicate honest. The other three bind their
+        # names to the instrument's own exported constant, and this checks that too rather
+        # than trusting the binding.
         observations = channels.observe(truth_state)
 
-        assert observations[OES_CHANNEL].instrument_id == OES_CHANNEL
-        assert observations[LIF_CHANNEL].instrument_id == LIF_CHANNEL
+        for name in CHANNEL_NAMES:
+            assert observations[name].instrument_id == name
 
     def test_each_channel_alone_produces_a_finite_log_likelihood(
         self, channels: ChannelSet, truth_state: PlasmaState
     ) -> None:
         joint = _joint_and_truth(channels, truth_state)
 
-        for name in (OES_CHANNEL, LIF_CHANNEL):
-            dropped = LIF_CHANNEL if name == OES_CHANNEL else OES_CHANNEL
-            alone = joint.without(dropped)
+        for name in CHANNEL_NAMES:
+            alone = _only(joint, name)
 
             detail = alone.detail(truth_state)
 
@@ -132,9 +160,9 @@ class TestTheChannelSet:
 
         without_lif = joint.without(LIF_CHANNEL)
 
-        assert without_lif.names == (OES_CHANNEL,)
+        assert without_lif.names == tuple(n for n in CHANNEL_NAMES if n != LIF_CHANNEL)
         assert math.isfinite(without_lif.log_prob(truth_state))
-        assert set(joint.names) == {OES_CHANNEL, LIF_CHANNEL}, "without() must not mutate"
+        assert joint.names == CHANNEL_NAMES, "without() must not mutate"
 
     def test_the_two_channels_integrate_for_genuinely_different_times(
         self, channels: ChannelSet
@@ -160,6 +188,27 @@ class TestTheChannelSet:
         # exists. (Found by mutation: deleting the guard left this test green.)
         with pytest.raises(KeyError, match="no observation supplied for lif"):
             channels.joint(observations)
+
+    def test_the_four_channels_integrate_for_genuinely_different_times(
+        self, channels: ChannelSet
+    ) -> None:
+        # The module docstring's acquisition-window section states the assumption that
+        # makes fusing these defensible — the plasma is steady over the longest window.
+        # Connecting Thomson stretched that span from a factor of 159 to eleven orders of
+        # magnitude (2 ns against a multi-hundred-second accumulation), so the assumption
+        # is doing far more work than it was, and this pins the fact rather than letting
+        # it be discovered later.
+        oes_s = float(magnitude_in(channels.oes_window.duration, "s"))
+        thomson_s = float(magnitude_in(channels.thomson_window.duration, "s"))
+
+        assert thomson_s > 1.0e9 * oes_s
+        for window in (
+            channels.oes_window,
+            channels.lif_window,
+            channels.thomson_window,
+            channels.interferometry_window,
+        ):
+            assert float(magnitude_in(window.start, "s")) == 0.0
 
 
 class TestTheReconstructedIvdf:
@@ -215,7 +264,7 @@ class TestWhatLifAddsThatOesCannotSee:
         self, channels: ChannelSet, truth_state: PlasmaState
     ) -> None:
         theta = _operating_theta()
-        joint = _joint_and_truth(channels, truth_state).without(LIF_CHANNEL)
+        joint = _only(_joint_and_truth(channels, truth_state), OES_CHANNEL)
 
         at_truth = joint.log_prob(_state(theta))
         at_four_times_t_i = joint.log_prob(_state(theta.replace(T_i=theta.T_i * 4.0)))
@@ -227,7 +276,7 @@ class TestWhatLifAddsThatOesCannotSee:
     ) -> None:
         theta = _operating_theta()
         observations = channels.observe(truth_state)
-        lif = channels.joint(observations).without(OES_CHANNEL)
+        lif = _only(channels.joint(observations), LIF_CHANNEL)
 
         at_truth = lif.log_prob(_state(theta))
         hotter = lif.log_prob(_state(theta.replace(T_i=theta.T_i * 1.5)))
@@ -255,8 +304,8 @@ class TestWhatLifAddsThatOesCannotSee:
         theta = _operating_theta()
         observations = channels.observe(truth_state)
         joint = channels.joint(observations)
-        oes = joint.without(LIF_CHANNEL)
-        lif = joint.without(OES_CHANNEL)
+        oes = _only(joint, OES_CHANNEL)
+        lif = _only(joint, LIF_CHANNEL)
 
         k = 1.05
         along_ridge = _state(theta.replace(n_0=theta.n_0 * k, T_e=theta.T_e / k**2))
@@ -306,7 +355,7 @@ class TestTheTuningRange:
 
         assert channels.lif.is_informative(reachable)
 
-    def test_at_rp1_both_channels_now_contribute(self, channels: ChannelSet) -> None:
+    def test_at_rp1_every_channel_now_contributes(self, channels: ChannelSet) -> None:
         # The result the whole exercise was for: a genuine two-channel fusion at RP-1's own
         # operating point, with nothing excluded. doc 01 IF-6's naming discipline still
         # applies — `excluded` being empty is a checked claim, not an assumption.
@@ -315,7 +364,7 @@ class TestTheTuningRange:
 
         detail = joint.detail(rp1_state)
 
-        assert set(detail.contributing) == {OES_CHANNEL, LIF_CHANNEL}
+        assert set(detail.contributing) == set(CHANNEL_NAMES)
         assert detail.excluded == ()
         assert math.isfinite(detail.log_prob)
 
@@ -345,3 +394,65 @@ class TestTheTuningRange:
         )
 
         assert channels.lif._resolve_z_index(sparse) == channels.lif._resolve_z_index(dense)
+
+
+class TestThomsonIsExcludedRatherThanCrashingWhenTheSheathSwallowsItsVolume:
+    """The invariant a MAP search actually depends on — see `_ThomsonOutsideTheSheath`.
+
+    `JointLikelihood.detail` asks `is_informative` and, if the answer is yes, calls
+    `forward` with no `except` anywhere in the path. So for every theta the optimiser can
+    propose, **either the channel must report itself blind or `forward` must return finite
+    values**. Anything else is not a bad fit, it is a crashed run.
+
+    Thomson violated that before the gate existed, and not marginally: its own
+    params-only floor admits `n_0` down to 2.42e15, while the pinned measurement volume
+    sits at a *fixed* 2.28 mm and the sheath it has to be outside of grows as
+    `sqrt(T_e / n_0)`. Measured, `forward` raised `ThomsonBlindWindowError` for 16 of 81
+    points across the prior — continuously for `n_0` in roughly [2.6e15, 1.7e16] at
+    `T_e = 3` eV. doc 01 IF-6 makes exclusion the right answer there, and
+    `FusionDetail.excluded` is what keeps a dropped channel recorded rather than silent.
+    """
+
+    def test_no_theta_in_the_map_search_region_either_raises_or_goes_unreported(
+        self, channels: ChannelSet, truth_state: PlasmaState
+    ) -> None:
+        joint = _joint_and_truth(channels, truth_state)
+        theta = _operating_theta()
+
+        excluded_somewhere = False
+        for n_0 in np.geomspace(1.0e15, 1.0e19, 9):
+            for T_e in np.geomspace(1.0, 10.0, 5):
+                state = _state(theta.replace(n_0=float(n_0), T_e=float(T_e)))
+
+                # The assertion is that this call does not raise. A ThomsonBlindWindowError
+                # escaping here is precisely the failure the gate exists to prevent, and
+                # letting it propagate is what makes this test able to fail.
+                detail = joint.detail(state)
+
+                assert math.isfinite(detail.log_prob)
+                if THOMSON_CHANNEL in detail.excluded:
+                    excluded_somewhere = True
+
+        # Not vacuous: if the gate never excluded anything, this test would be passing
+        # because the region is easy rather than because the gate works.
+        assert excluded_somewhere, (
+            "no theta in the swept region excluded Thomson, so this test is not exercising "
+            "the gate it was written for"
+        )
+
+    def test_the_gate_is_what_is_doing_it_rather_than_luck(self, channels: ChannelSet) -> None:
+        # Pin the mechanism, not just the symptom: at a theta whose sheath is thicker than
+        # the pinned position the channel must report itself blind, and at RP-1 — where the
+        # sheath is a small fraction of the domain — it must not.
+        registry = default_registry()
+        species = _argon_ion(registry)
+        swallowed = _to_plasma_params(
+            _reference_theta().replace(n_0=1.0e16), species=species, registry=registry
+        )
+        healthy = _to_plasma_params(_reference_theta(), species=species, registry=registry)
+
+        assert not channels.thomson.inversion.is_informative(swallowed)
+        assert channels.thomson.inversion.is_informative(healthy)
+        # The instrument's own floor would have admitted the swallowed state, which is what
+        # makes the campaign-level half of the gate necessary rather than redundant.
+        assert channels.thomson.inversion.instrument.is_informative(swallowed)

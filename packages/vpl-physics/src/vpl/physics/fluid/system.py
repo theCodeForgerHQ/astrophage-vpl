@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeAlias
 
 import basix.ufl
 import numpy as np
@@ -52,7 +52,7 @@ __all__ = [
 ]
 
 #: A field sampled on the spatial grid, in SI magnitudes.
-type FloatArray = np.typing.NDArray[np.float64]
+FloatArray: TypeAlias = np.typing.NDArray[np.float64]
 
 _E_C = float(magnitude_in(ELEMENTARY_CHARGE, "C"))
 _M_E_KG = float(magnitude_in(ELECTRON_MASS, "kg"))

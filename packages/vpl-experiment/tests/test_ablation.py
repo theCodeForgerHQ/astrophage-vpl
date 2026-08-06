@@ -26,14 +26,14 @@ from vpl.experiment.ablation import (
     BASELINE_LABEL,
     RP1_LABEL,
     WITHOUT_LIF_LABEL,
-    WITHOUT_OES_LABEL,
     AblationResult,
     _prepare,
     render_table,
     run_ablation,
     run_rp1_baseline,
+    without_label,
 )
-from vpl.experiment.channels import LIF_CHANNEL, OES_CHANNEL
+from vpl.experiment.channels import CHANNEL_NAMES, LIF_CHANNEL, OES_CHANNEL
 from vpl.inverse.parameters import ControlParameters
 
 _SEED = 7
@@ -53,10 +53,10 @@ def rp1() -> AblationResult:
 
 
 class TestPrepare:
-    def test_the_joint_likelihood_has_both_channel_names(self) -> None:
+    def test_the_joint_likelihood_has_every_channel_name(self) -> None:
         prepared = _prepare(seed=_SEED, wall_bias_v=-100.0, registry=None)
 
-        assert set(prepared.joint.names) == {OES_CHANNEL, LIF_CHANNEL}
+        assert prepared.joint.names == CHANNEL_NAMES
 
     def test_without_returns_a_new_object_and_leaves_the_original_untouched(self) -> None:
         # doc 11 §9 item 6's primitive, and the first risk a peer review flagged: an
@@ -68,9 +68,9 @@ class TestPrepare:
         without_lif = prepared.joint.without(LIF_CHANNEL)
         without_oes = prepared.joint.without(OES_CHANNEL)
 
-        assert prepared.joint.names == baseline_names_before == (OES_CHANNEL, LIF_CHANNEL)
-        assert without_lif.names == (OES_CHANNEL,)
-        assert without_oes.names == (LIF_CHANNEL,)
+        assert prepared.joint.names == baseline_names_before == CHANNEL_NAMES
+        assert without_lif.names == tuple(n for n in CHANNEL_NAMES if n != LIF_CHANNEL)
+        assert without_oes.names == tuple(n for n in CHANNEL_NAMES if n != OES_CHANNEL)
 
     def test_the_grid_is_sized_from_rp1_regardless_of_the_operating_bias(self) -> None:
         # closed_loop's own module docstring: a spatial grid sized from anything other than
@@ -104,35 +104,33 @@ class TestRunAblation:
     def test_the_baseline_is_reported_first_and_the_ablations_follow_in_a_fixed_order(
         self, sweep: tuple[AblationResult, ...]
     ) -> None:
+        # One leave-one-out row per channel, in CHANNEL_NAMES order — doc 11 §9 item 6's
+        # "drop *each* channel". Asserted against CHANNEL_NAMES rather than a hand-listed
+        # pair so that connecting a fifth channel without ablating it fails here.
         assert [result.label for result in sweep] == [
             BASELINE_LABEL,
-            WITHOUT_LIF_LABEL,
-            WITHOUT_OES_LABEL,
+            *(without_label(name) for name in CHANNEL_NAMES),
         ]
 
-    def test_the_baseline_configuration_is_scored_by_both_channels(
+    def test_the_baseline_configuration_is_scored_by_every_channel(
         self, sweep: tuple[AblationResult, ...]
     ) -> None:
         baseline = sweep[0]
 
-        assert baseline.contributing == (OES_CHANNEL, LIF_CHANNEL)
+        assert baseline.contributing == CHANNEL_NAMES
         assert baseline.excluded == ()
 
-    def test_dropping_lif_leaves_only_oes_contributing(
+    def test_each_ablation_drops_exactly_its_own_channel_and_keeps_the_rest(
         self, sweep: tuple[AblationResult, ...]
     ) -> None:
-        without_lif = sweep[1]
-
-        assert without_lif.contributing == (OES_CHANNEL,)
-        assert LIF_CHANNEL not in without_lif.contributing
-
-    def test_dropping_oes_leaves_only_lif_contributing(
-        self, sweep: tuple[AblationResult, ...]
-    ) -> None:
-        without_oes = sweep[2]
-
-        assert without_oes.contributing == (LIF_CHANNEL,)
-        assert OES_CHANNEL not in without_oes.contributing
+        # Generalised from the two hand-written cases this had when the set was OES+LIF.
+        # The property is the same one those asserted — the named channel is gone and
+        # nothing else is — but stated once over every channel, so a new channel is
+        # covered the moment it is connected rather than whenever someone remembers.
+        for dropped, result in zip(CHANNEL_NAMES, sweep[1:], strict=True):
+            assert result.label == without_label(dropped)
+            assert dropped not in result.contributing
+            assert result.contributing == tuple(n for n in CHANNEL_NAMES if n != dropped)
 
     def test_every_configuration_is_scored_against_the_same_sealed_truth(
         self, sweep: tuple[AblationResult, ...]
@@ -170,7 +168,7 @@ class TestRunAblation:
 
 @pytest.mark.slow
 class TestRp1Baseline:
-    def test_both_channels_now_contribute_at_rp1_after_the_lif_gate_was_reanchored(
+    def test_every_channel_contributes_at_rp1_after_the_lif_gate_was_reanchored(
         self, rp1: AblationResult
     ) -> None:
         # This used to pin doc 01 IF-6's exclusion: LIF declared itself blind at RP-1's
@@ -180,7 +178,11 @@ class TestRp1Baseline:
         # channels.py's LIF channel now measures at the sheath edge by default too, so both
         # channels are informative here. This is the check that would catch a regression
         # back to the old, wall-anchored gate.
-        assert rp1.contributing == (OES_CHANNEL, LIF_CHANNEL)
+        # Widened from (OES, LIF) to the whole set when Thomson and interferometry were
+        # connected: the property being pinned is unchanged — nothing is excluded at RP-1 —
+        # and asserting it over CHANNEL_NAMES keeps it true of every channel rather than of
+        # the two that existed when it was written.
+        assert rp1.contributing == CHANNEL_NAMES
         assert rp1.excluded == ()
 
     def test_the_label_names_it_as_the_rp1_configuration(self, rp1: AblationResult) -> None:

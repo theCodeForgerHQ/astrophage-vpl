@@ -52,6 +52,8 @@ from numpy.typing import NDArray
 
 pytest.importorskip("dolfinx")
 
+from typing import TypeAlias
+
 from vpl.core.constants import ELEMENTARY_CHARGE, VACUUM_PERMITTIVITY
 from vpl.core.state import SpatialGrid
 from vpl.core.units import Q_, magnitude_in
@@ -71,7 +73,7 @@ from vpl.validation.manufactured import (
     poisson_manufactured,
 )
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 _E_C = float(magnitude_in(ELEMENTARY_CHARGE, "C"))
 _EPS0 = float(magnitude_in(VACUUM_PERMITTIVITY, "F/m"))

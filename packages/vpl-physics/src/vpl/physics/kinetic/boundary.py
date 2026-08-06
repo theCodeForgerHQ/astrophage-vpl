@@ -88,7 +88,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -114,8 +114,8 @@ __all__ = [
     "sample_secondary_velocities",
 ]
 
-type FloatArray = NDArray[np.float64]
-type BoolArray = NDArray[np.bool_]
+FloatArray: TypeAlias = NDArray[np.float64]
+BoolArray: TypeAlias = NDArray[np.bool_]
 
 _E: Final[float] = float(magnitude_in(ELEMENTARY_CHARGE, "C"))
 _M_E: Final[float] = float(magnitude_in(ELECTRON_MASS, "kg"))

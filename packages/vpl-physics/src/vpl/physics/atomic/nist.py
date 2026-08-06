@@ -48,7 +48,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -69,7 +69,7 @@ __all__ = [
     "parse_nist_asd",
 ]
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 #: ``h c`` in eV nm — 1239.84. From CODATA via :mod:`vpl.core.constants`, never typed in:
 #: doc 09 §2.5 makes a hand-entered fundamental constant "a plausible, undetectable and

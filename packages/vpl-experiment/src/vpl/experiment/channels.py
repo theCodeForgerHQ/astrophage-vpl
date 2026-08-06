@@ -1,9 +1,12 @@
 """Diagnostic channel assembly for the closed loop — doc 05 §3.2, doc 11 §9 item 3.
 
 :mod:`vpl.inverse.fusion` is the sum over channels; this module is what fills it. It
-builds the OES channel the closed loop already runs, builds the LIF channel that has been
-sitting fully implemented and unconnected in :mod:`vpl.instruments.lif`, and hands back a
-:class:`~vpl.inverse.fusion.JointLikelihood` of the two together with the truth-side
+builds the OES channel the closed loop already runs, builds the LIF channel that had been
+sitting fully implemented and unconnected in :mod:`vpl.instruments.lif`, delegates the
+Thomson and interferometry channels to :mod:`vpl.experiment.channels_thomson` and
+:mod:`vpl.experiment.channels_interferometry` (which own their own pinning, window sizing
+and calibration sets), and hands back a
+:class:`~vpl.inverse.fusion.JointLikelihood` of all four together with the truth-side
 observation for each.
 
 ## Why a second channel at all
@@ -14,6 +17,36 @@ physics multiplied together (``Gamma_i ~ n_0 sqrt(T_e)``), so a single channel c
 product and slides along the degeneracy. LIF measures the ion velocity distribution
 directly — line centre from the drift, width from ``T_i``, amplitude from ``n_i`` — which
 is a different functional of the same state, and different is the whole point.
+
+## Why a third and fourth, and why they are the ones that matter
+
+The 36.5 % T2 error against a ±3.11 % interval had a measured cause, not a suspected one: a
+calibration error is **one** coherent draw applied to every pixel, and the likelihood was
+scoring it as ``N`` independent errors — a 23,041x overweighting on OES. That arithmetic is
+fixed in :mod:`vpl.instruments.coherent`, and ``calibration_uncertainty=`` on each
+instrument's ``likelihood`` is the switch that uses it.
+
+Fixing the arithmetic then exposed the physics, which is the part worth recording here.
+**With honest 6 % calibration uncertainty, a single OES line cannot identify plasma density
+at all.** Overall brightness was carrying essentially all of the density information, so
+"the plasma is 6 % denser" and "my lamp reads 6 % bright" produce identical data. Turning
+the flag on with only OES and LIF connected does not widen the interval — it removes it:
+measured, T1 degrades by a factor of 376, ``T_e`` runs to its prior edge, and the interval
+comes back ``None`` because the Hessian is singular
+(:class:`~vpl.inverse.laplace.PosteriorNotPositiveDefiniteError`). That is doc 05 §6's null
+space appearing exactly where the algebra says it should, not a bug.
+
+So the fix is channels that measure density through physics with no radiometric lamp in it:
+
+* **Thomson** (doc 02 §7.1) counts scattered photons against a *Rayleigh* standard and
+  reads ``T_e`` from the scattered spectrum's width — two observables, one measurement,
+  neither of them a brightness ratio.
+* **Interferometry** (doc 04 §5.1) reads ``Delta phi = r_e lambda INTEGRAL n_e dl``, which
+  contains ``n_e`` alone and no ``T_e`` at all, calibrated against an AOM frequency
+  reference and a length metrology chain.
+
+Neither needs a reconstructed distribution the way LIF does — both read fields L0 and L1
+already emit — so neither carries doc 03 §6's assumed-Maxwellian caveat.
 
 ## Three findings this module ran into, all stated rather than worked around
 
@@ -49,6 +82,17 @@ never lets the default resolve per state, exactly as ``_fixed_spatial_grid`` siz
 from the reference and reuses it for every trial. ``test_the_measurement_volume_is_pinned_
 and_does_not_move_with_theta`` is what stops that being quietly simplified away.
 
+**The same discipline is applied to the two new channels, and it was checked rather than
+assumed.** Thomson also takes a ``z_index``, so
+:func:`~vpl.experiment.channels_thomson.build_thomson_channel` resolves one explicit
+non-negative index once from the reference grid and configures it directly, with its own
+guard test of the same name. Interferometry integrates along chords instead of sampling a
+node, which is a different enough mechanism that the analogy had to be checked in the code
+rather than assumed: ``chord_positions_m`` takes no state argument at any point, so the
+ladder is fixed at ``configure`` time by construction, and
+:mod:`vpl.experiment.channels_interferometry` pins that with a test that compares the chord
+array before and after ``forward`` is evaluated across the search region.
+
 **2. At the registered nominal beam the channel is saturation-broadened past uselessness,
 so the beam is attenuated here and the attenuation is declared.** ``lif.yaml``'s laser
 power and beam waist with its (deliberately upper-bound) ``pump_branching_ratio`` give
@@ -83,14 +127,20 @@ L2 truth, which does resolve ``f_i``, that stops being circular.
 
 ## The acquisition-window assumption, stated because doc 05 §3.2 requires it to be
 
-The two channels integrate for genuinely different times. OES gates for
+The four channels integrate for genuinely different times. OES gates for
 ``OES-D2.gate_width`` = 2 ns; LIF must gate for at least a few times the upper level's
 32 ns radiative relaxation or :mod:`vpl.instruments.lif.scan`'s steady-state solution
 over-predicts the signal, so its window here is
 :data:`_LIF_GATE_RELAXATION_TIMES` relaxation times, ~318 ns. That is a factor of 159, and
 both windows start at ``t = 0``.
 
-**The assumption is that the plasma is steady over the longer of the two windows**, which
+Connecting Thomson stretches that span by a great deal further. doc 02 §7.1 makes an
+absolute Thomson point an *accumulation* rather than a gate, and
+:func:`~vpl.experiment.channels_thomson.thomson_acquisition_window` sizes it from the
+reference density at ~1.1e3 s. Against OES's 2 ns that is a factor of order 1e11, all four
+windows still starting at ``t = 0``.
+
+**The assumption is that the plasma is steady over the longest window**, which
 is what makes "the same instant" a defensible description of two acquisitions that are not
 simultaneous. It holds for the states this module is used with: L0 and L1 are both
 steady-state solves (``FluidSheathSolver.solve``'s own docstring is explicit that L1 "as
@@ -100,13 +150,51 @@ instant is "straightforwardly false" for a transient, so **this module refuses a
 time-resolved state** rather than fusing across it — see :func:`reconstruct_ivdf`. A
 phase-resolved RF run is exactly that case and needs a window-aware fusion this does not
 have.
+
+## Two limitations the wiring exposed, recorded rather than tuned away
+
+Both were found by measurement while connecting these channels, and neither is fixed here,
+because fixing either would mean changing a committed hardware specification or a grid this
+module does not own.
+
+**1. Seven of interferometry's eight chords fall outside the observation grid.**
+``closed_loop._fixed_spatial_grid`` sizes one grid to two sheath thicknesses at the RP-1
+reference: measured, ``z = 0`` to ``2.28 mm`` over 11 points. doc 02 §8.2 IF-G1 fixes the
+chords at 5 mm spacing, so the ladder spans ``0`` to ``35 mm`` and only chord 0 lands
+inside; ``_predict``'s :func:`numpy.interp` clamps the other seven to the outermost node's
+density. Against this grid the channel is therefore one interior reading plus one repeated
+edge reading, not eight independent line integrals, and it buys nothing like the
+``1/sqrt(8)`` a genuinely independent set would. It is still informative — chord 0's phase
+carries density information no radiometric channel has, which is the whole reason the
+channel is here — but "eight chords" overstates what is being fused. Moving ``start_z_m``
+or shrinking the spacing would be tuning doc 02 §8.2's hardware numbers to flatter a grid;
+the honest fix is a fixed grid sized for a genuinely multi-diagnostic run, and
+:func:`build_channels`'s ``interferometry_start_z_m`` is the knob that decision would use.
+
+**2. Thomson's doc 01 IF-6 gate cannot, on its own, express where its measurement volume
+is.** ``is_informative`` receives a :class:`~vpl.core.state.PlasmaParams` and nothing else,
+so it answers "is the density high enough for this channel to work at all" — measured, a
+floor of ``n_0 = 2.42e15``. But the pinned volume sits at a *fixed position*, and the sheath
+that position has to be outside of grows as ``sqrt(T_e / n_0)``. Measured on the fixed grid:
+at ``n_0 <= 1e16`` the sheath is thicker than the ``2.28 mm`` domain, the pinned node is
+buried inside it where ``n_e`` is many orders of magnitude below the bulk, and ``forward``
+raises :class:`~vpl.instruments.thomson.instrument.ThomsonBlindWindowError`. Between
+``n_0 = 2.42e15`` and roughly ``2.5e16`` the gate therefore admits a state the forward model
+refuses — and :meth:`~vpl.inverse.fusion.JointLikelihood.detail` calls ``forward`` with no
+``except``, so that is an optimiser crash rather than an excluded channel.
+:mod:`vpl.experiment.channels_thomson` closes it at the campaign level, where the position
+*is* known, by also requiring the analytic sheath thickness at the trial ``theta`` to be
+smaller than the pinned position. That gate uses the inversion's own L0 thickness, so
+against an L1 or L2 truth it is approximate; it is written to err toward excluding a
+marginal channel, which doc 01 IF-6 makes the safe direction since an exclusion is named in
+:class:`~vpl.inverse.fusion.FusionDetail` and can be checked afterwards.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from typing import Final
 
 import numpy as np
@@ -127,6 +215,16 @@ from vpl.core.state import (
     VelocityDistribution,
 )
 from vpl.core.units import Q_, magnitude_in
+from vpl.experiment.channels_interferometry import (
+    INTERFEROMETRY_CHANNEL,
+    InterferometryChannel,
+    build_interferometry_channel,
+)
+from vpl.experiment.channels_thomson import (
+    THOMSON_CHANNEL,
+    ThomsonChannel,
+    build_thomson_channel,
+)
 from vpl.instruments.lif.instrument import (
     FREQUENCY_AXIS_STANDARD,
     RELATIVE_SCALE_STANDARD,
@@ -139,12 +237,18 @@ from vpl.instruments.lif.instrument import (
 from vpl.instruments.lif.laser import Laser
 from vpl.instruments.lif.scan import doppler_detuning_hz, resonant_velocity_m_per_s
 from vpl.instruments.lif.transition import ProbeTransition
-from vpl.instruments.oes.instrument import OesInstrument
+from vpl.instruments.oes.instrument import EedfProvider, OesInstrument
+from vpl.instruments.thomson.instrument import ThomsonInstrument
 from vpl.inverse.fusion import Channel, JointLikelihood
+from vpl.physics.analytic.sheath import AnalyticSheathSolver
+from vpl.physics.eedf.grid import EnergyGrid
 
 __all__ = [
+    "CHANNEL_NAMES",
+    "INTERFEROMETRY_CHANNEL",
     "LIF_CHANNEL",
     "OES_CHANNEL",
+    "THOMSON_CHANNEL",
     "ChannelSet",
     "build_channels",
     "reconstruct_ivdf",
@@ -334,11 +438,18 @@ class _LifOnReconstructedIvdf:
     everything else unchanged.
     """
 
-    __slots__ = ("_instrument", "_registry")
+    __slots__ = ("_calibration_uncertainty", "_instrument", "_registry")
 
-    def __init__(self, instrument: LifInstrument, *, registry: ParameterRegistry) -> None:
+    def __init__(
+        self,
+        instrument: LifInstrument,
+        *,
+        registry: ParameterRegistry,
+        calibration_uncertainty: bool = False,
+    ) -> None:
         self._instrument = instrument
         self._registry = registry
+        self._calibration_uncertainty = calibration_uncertainty
 
     def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
         return self._instrument.forward(reconstruct_ivdf(state, registry=self._registry), w)
@@ -347,7 +458,11 @@ class _LifOnReconstructedIvdf:
         return self._instrument.observe(reconstruct_ivdf(state, registry=self._registry), w)
 
     def likelihood(self, obs: Measurement, pred: Observable) -> float:
-        return float(self._instrument.likelihood(obs, pred))
+        return float(
+            self._instrument.likelihood(
+                obs, pred, calibration_uncertainty=self._calibration_uncertainty
+            )
+        )
 
     def is_informative(self, state_guess: PlasmaParams) -> bool:
         return bool(self._instrument.is_informative(state_guess))
@@ -359,6 +474,136 @@ class _LifOnReconstructedIvdf:
 
     def __repr__(self) -> str:
         return f"_LifOnReconstructedIvdf({self._instrument!r})"
+
+
+class _ThomsonOutsideTheSheath:
+    """Thomson's inversion side, with the half of doc 01 IF-6 the instrument cannot ask.
+
+    :meth:`~vpl.instruments.thomson.instrument.ThomsonInstrument.is_informative` is handed a
+    :class:`~vpl.core.state.PlasmaParams` and nothing else, so the only question it can
+    answer is "is the density high enough for this channel to work at all" — measured, a
+    floor of ``n_0 = 2.42e15``. It cannot ask the other half, because the other half is about
+    a *position*: the measurement volume is pinned at a fixed ``z``, and whether that ``z``
+    is in the quasineutral bulk or buried inside the sheath depends on the sheath thickness,
+    which grows as ``sqrt(T_e / n_0)``.
+
+    Measured on the closed loop's fixed 2.28 mm grid: at ``n_0 <= 1e16`` the sheath is
+    thicker than the whole domain, the pinned node sits inside it where ``n_e`` is dozens of
+    orders of magnitude below the bulk, and
+    :meth:`~vpl.instruments.thomson.instrument.ThomsonInstrument.forward` raises
+    :class:`~vpl.instruments.thomson.instrument.ThomsonBlindWindowError`. So between
+    ``n_0 = 2.42e15`` and roughly ``2.5e16`` the instrument's own gate admits a state its
+    forward model refuses — and :meth:`~vpl.inverse.fusion.JointLikelihood.detail` calls
+    ``forward`` with no ``except``, which makes that an optimiser crash rather than an
+    excluded channel.
+
+    This class closes it where the position is actually known. ``is_informative`` requires
+    both the instrument's own floor **and** that the analytic sheath thickness at the trial
+    ``theta`` is smaller than the pinned position. doc 01 IF-6 is explicit that a ``False``
+    means the term is not formed rather than formed and small, and
+    :class:`~vpl.inverse.fusion.FusionDetail` names the exclusion, so a channel dropped this
+    way is recorded and checkable afterwards rather than silently missing.
+
+    **The approximation, stated.** The thickness comes from
+    :class:`~vpl.physics.analytic.sheath.AnalyticSheathSolver`, which is the *inversion's*
+    L0 model; against an L1 or L2 truth it is only approximate. It is used anyway because it
+    is the same model every trial ``theta`` is already scored through, so the gate cannot
+    disagree with the states the optimiser is actually proposing. Where it is wrong it errs
+    toward excluding a channel that would in fact have been marginally usable, which is the
+    safe direction: a named exclusion costs information, an unhandled exception costs the
+    run.
+    """
+
+    __slots__ = ("_calibration_uncertainty", "_instrument", "_solver", "_z_pin_m")
+
+    def __init__(
+        self,
+        instrument: ThomsonInstrument,
+        *,
+        z_pin_m: float,
+        solver: AnalyticSheathSolver,
+        calibration_uncertainty: bool = False,
+    ) -> None:
+        self._instrument = instrument
+        self._z_pin_m = z_pin_m
+        self._solver = solver
+        self._calibration_uncertainty = calibration_uncertainty
+
+    def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
+        return self._instrument.forward(state, w)
+
+    def observe(self, state: PlasmaState, w: AcquisitionWindow) -> Measurement:
+        return self._instrument.observe(state, w)
+
+    def likelihood(self, obs: Measurement, pred: Observable) -> float:
+        return float(
+            self._instrument.likelihood(
+                obs, pred, calibration_uncertainty=self._calibration_uncertainty
+            )
+        )
+
+    def is_informative(self, state_guess: PlasmaParams) -> bool:
+        if not self._instrument.is_informative(state_guess):
+            return False
+        thickness = self._solver.thickness(state_guess)
+        thickness_m = float(magnitude_in(thickness, "m"))
+        return thickness_m < self._z_pin_m
+
+    @property
+    def instrument(self) -> ThomsonInstrument:
+        """The wrapped channel, for ``metadata`` and ``required_accumulation_s``."""
+        return self._instrument
+
+    def __repr__(self) -> str:
+        return f"_ThomsonOutsideTheSheath({self._instrument!r}, z_pin_m={self._z_pin_m!r})"
+
+
+class _OesWithCalibrationUncertainty:
+    """:class:`OesInstrument` with doc 04 §7.3's calibration term switched on at the sum.
+
+    :class:`~vpl.inverse.fusion.JointLikelihood` calls ``instrument.likelihood(obs, pred)``
+    positionally and has no way to pass a keyword through — deliberately, since doc 08 §3
+    forbids the inverse layer from knowing any instrument's private options. So the choice
+    of whether this campaign carries calibration uncertainty is bound *here*, where
+    :func:`build_channels` already decides every other per-campaign switch, and the fusion
+    layer stays ignorant of it.
+
+    Why it needs binding at all rather than being left on:
+    ``OesInstrument.likelihood``'s own docstring gives the reason its default is ``False`` —
+    T0 and T1 are published regression baselines and a flipped default silently re-scores
+    every existing caller. "Which runs carry calibration uncertainty is a property of the
+    *campaign*, not of this method", and this class is where a campaign says so.
+    """
+
+    __slots__ = ("_calibration_uncertainty", "_instrument")
+
+    def __init__(self, instrument: OesInstrument, *, calibration_uncertainty: bool) -> None:
+        self._instrument = instrument
+        self._calibration_uncertainty = calibration_uncertainty
+
+    def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
+        return self._instrument.forward(state, w)
+
+    def observe(self, state: PlasmaState, w: AcquisitionWindow) -> Measurement:
+        return self._instrument.observe(state, w)
+
+    def likelihood(self, obs: Measurement, pred: Observable) -> float:
+        return float(
+            self._instrument.likelihood(
+                obs, pred, calibration_uncertainty=self._calibration_uncertainty
+            )
+        )
+
+    def is_informative(self, state_guess: PlasmaParams) -> bool:
+        return bool(self._instrument.is_informative(state_guess))
+
+    @property
+    def instrument(self) -> OesInstrument:
+        """The wrapped channel, for ``metadata`` and ``run_conditions``."""
+        return self._instrument
+
+    def __repr__(self) -> str:
+        return f"_OesWithCalibrationUncertainty({self._instrument!r})"
 
 
 def _lif_calibration_set(registry: ParameterRegistry) -> CalibrationSet:
@@ -427,6 +672,7 @@ def _lif_instrument(
     seed: int,
     registry: ParameterRegistry,
     imperfect_calibration: bool,
+    calibration_uncertainty: bool = False,
 ) -> _LifOnReconstructedIvdf:
     """One configured LIF channel — doc 08 §6's manifest block, filled in from code.
 
@@ -448,7 +694,9 @@ def _lif_instrument(
             }
         )
     )
-    return _LifOnReconstructedIvdf(instrument, registry=registry)
+    return _LifOnReconstructedIvdf(
+        instrument, registry=registry, calibration_uncertainty=calibration_uncertainty
+    )
 
 
 def _lif_acquisition_window(registry: ParameterRegistry) -> AcquisitionWindow:
@@ -467,9 +715,21 @@ def _lif_acquisition_window(registry: ParameterRegistry) -> AcquisitionWindow:
 # ── the assembled set ───────────────────────────────────────────────────────────
 
 
+#: Every channel this module assembles, in the fixed order a fusion detail and an ablation
+#: table both report them in. Named once so :meth:`ChannelSet.observe`, :meth:`ChannelSet.
+#: joint` and its missing-observation guard cannot drift into three different ideas of what
+#: "the channel set" is.
+CHANNEL_NAMES: Final[tuple[str, ...]] = (
+    OES_CHANNEL,
+    LIF_CHANNEL,
+    THOMSON_CHANNEL,
+    INTERFEROMETRY_CHANNEL,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ChannelSet:
-    """Both channels, on the truth side and the inversion side, plus their windows.
+    """All four channels, on the truth side and the inversion side, plus their windows.
 
     Truth-side and inversion-side instruments are separate objects for the reason doc 04 §9
     gives: only the instrument that generates the measurement is calibrated, and at T1/T2
@@ -481,18 +741,29 @@ class ChannelSet:
         oes_window: doc 02 §6.2 OES-D2's minimum ICCD gate, at ``t = 0``.
         lif_window: :data:`_LIF_GATE_RELAXATION_TIMES` upper-state relaxation times, also
             at ``t = 0``. See the module docstring for the steady-state assumption that
-            makes two windows this different fusable at all.
+            makes windows this different fusable at all.
+        thomson_window: The doc 02 §7.1 accumulation, sized from the reference density by
+            :func:`~vpl.experiment.channels_thomson.thomson_acquisition_window` — hundreds
+            of seconds, and by far the longest window here.
+        interferometry_window: doc 02 §8's window, which
+            :meth:`~vpl.instruments.interferometry.instrument.InterferometryInstrument.
+            likelihood` also reads to rebuild its vibration covariance, so it is one object
+            shared by the truth-side draw and the inversion-side scoring.
     """
 
     oes_window: AcquisitionWindow
     lif_window: AcquisitionWindow
+    thomson_window: AcquisitionWindow
+    interferometry_window: AcquisitionWindow
     _truth_oes: OesInstrument
     _truth_lif: _LifOnReconstructedIvdf
-    _oes: OesInstrument
+    _oes: _OesWithCalibrationUncertainty
     _lif: _LifOnReconstructedIvdf
+    _thomson: ThomsonChannel
+    _interferometry: InterferometryChannel
 
     def observe(self, truth_state: PlasmaState) -> dict[str, Measurement]:
-        """One synthetic measurement per channel — doc 07 §3 step 2, for both channels.
+        """One synthetic measurement per channel — doc 07 §3 step 2, for all four.
 
         The closed loop has to *generate* data as well as score it, and it must generate
         one dataset per channel from the same sealed truth state. Returned as a mapping
@@ -502,41 +773,50 @@ class ChannelSet:
         return {
             OES_CHANNEL: self._truth_oes.observe(truth_state, self.oes_window),
             LIF_CHANNEL: self._truth_lif.observe(truth_state, self.lif_window),
+            THOMSON_CHANNEL: self._thomson.truth.observe(truth_state, self.thomson_window),
+            INTERFEROMETRY_CHANNEL: self._interferometry.truth.observe(
+                truth_state, self.interferometry_window
+            ),
         }
 
     def joint(self, observations: Mapping[str, Measurement]) -> JointLikelihood:
         """doc 05 §3.2's sum, bound to one set of observations.
 
         The inversion-side instruments are used here, never the truth-side ones. Channels
-        appear in a fixed order so that a fusion detail and an ablation table read the same
-        way from run to run.
+        appear in :data:`CHANNEL_NAMES` order so that a fusion detail and an ablation table
+        read the same way from run to run.
 
         Raises:
-            KeyError: If an observation is missing for either channel. Silently fusing the
-                one channel that happened to be supplied would report a single-channel
-                result as a two-channel one.
+            KeyError: If an observation is missing for any channel. Silently fusing the
+                subset that happened to be supplied would report a two-channel result as a
+                four-channel one — which is exactly the claim doc 01 IF-6 requires to be
+                checkable rather than trusted.
         """
-        missing = sorted({OES_CHANNEL, LIF_CHANNEL} - set(observations))
+        missing = sorted(set(CHANNEL_NAMES) - set(observations))
         if missing:
             raise KeyError(
                 f"no observation supplied for {', '.join(missing)}; a joint likelihood "
                 f"built from a subset would report fewer channels than it claims. Use "
                 f"JointLikelihood.without() to ablate a channel deliberately."
             )
+        instruments = {
+            OES_CHANNEL: (self._oes, self.oes_window),
+            LIF_CHANNEL: (self._lif, self.lif_window),
+            THOMSON_CHANNEL: (self._thomson.inversion, self.thomson_window),
+            INTERFEROMETRY_CHANNEL: (
+                self._interferometry.inversion,
+                self.interferometry_window,
+            ),
+        }
         return JointLikelihood(
-            (
+            tuple(
                 Channel(
-                    name=OES_CHANNEL,
-                    instrument=self._oes,
-                    observation=observations[OES_CHANNEL],
-                    window=self.oes_window,
-                ),
-                Channel(
-                    name=LIF_CHANNEL,
-                    instrument=self._lif,
-                    observation=observations[LIF_CHANNEL],
-                    window=self.lif_window,
-                ),
+                    name=name,
+                    instrument=instruments[name][0],
+                    observation=observations[name],
+                    window=instruments[name][1],
+                )
+                for name in CHANNEL_NAMES
             )
         )
 
@@ -549,6 +829,16 @@ class ChannelSet:
         """
         return self._lif.instrument
 
+    @property
+    def thomson(self) -> ThomsonChannel:
+        """The Thomson pair and its pinned ``z_index`` — doc 02 §7.1's run conditions."""
+        return self._thomson
+
+    @property
+    def interferometry(self) -> InterferometryChannel:
+        """The interferometry pair and its resolved chord anchor — doc 02 §8.2's geometry."""
+        return self._interferometry
+
 
 def build_channels(
     *,
@@ -558,27 +848,72 @@ def build_channels(
     noise: bool = True,
     imperfect_calibration: bool = True,
     lif_z_index: int | None = None,
+    thomson_z_index: int | None = None,
+    interferometry_start_z_m: float | None = None,
+    calibration_uncertainty: bool = False,
+    truth_eedf_factory: Callable[[EnergyGrid], EedfProvider] | None = None,
 ) -> ChannelSet:
-    """Assemble the OES and LIF channels for one closed-loop configuration.
+    """Assemble all four channels for one closed-loop configuration.
 
     The OES half is built from :mod:`vpl.experiment.closed_loop`'s own helpers rather than
     reconstructed here — same registry, same acquisition window, same Maxwellian EEDF on
     the inversion side — so that the channel this module fuses and the channel that module
     runs alone cannot drift apart into two subtly different instruments that are then
-    compared against each other.
+    compared against each other. The Thomson and interferometry halves are delegated whole
+    to :mod:`vpl.experiment.channels_thomson` and
+    :mod:`vpl.experiment.channels_interferometry`, which own their own pinning,
+    window-sizing and calibration-set construction; this function only chooses the
+    campaign-level switches and puts the four together.
 
     Args:
         reference_state: An L0 solve at the RP-1 reference parameters, on the fixed
-            observation grid. Used only to *size* the LIF scan, never to generate data —
-            see :func:`_lif_scan_half_span_ghz`.
-        seed: The single recorded seed (doc 00 E3) both channels derive their streams from.
+            observation grid. Used only to *size* the LIF scan and the Thomson accumulation
+            window and to *resolve* the pinned measurement indices — never to generate data.
+            See :func:`_lif_scan_half_span_ghz` for the discipline and the reason for it.
+        seed: The single recorded seed (doc 00 E3) every channel derives its streams from.
         registry: Parameter source. Defaults to :func:`~vpl.core.params.default_registry`.
-        noise: Whether the OES truth instrument applies photon statistics — doc 05 §3.1.
+        noise: Whether the truth instruments apply their own noise models — doc 05 §3.1.
             The LIF channel has no detector noise to switch: doc 04 §1 puts the eighteen
             sources of doc 04 §7.2 in ``F4``, and ``LifInstrument.observe``'s docstring is
             explicit that its output is not a complete synthetic measurement.
-        imperfect_calibration: Whether both truth instruments apply the doc 04 §7.3
+        imperfect_calibration: Whether the truth instruments apply the doc 04 §7.3
             estimated response rather than the true one.
+        thomson_z_index: Which spatial grid point Thomson's 90 um measurement volume sits
+            at. ``None`` takes
+            :mod:`vpl.experiment.channels_thomson`'s own pinned resolution, which is a
+            fixed index resolved once from the reference grid for exactly the reason
+            ``lif_z_index`` is — see the module docstring's first finding.
+        interferometry_start_z_m: Where the 8-chord ladder begins. ``None`` takes doc 02
+            §8.2's wall anchor. See
+            :mod:`vpl.experiment.channels_interferometry`'s grid-domain finding before
+            moving it: the closed loop's fixed observation grid is far shorter than the
+            ladder's 35 mm span, and relocating the ladder does not fix that.
+        calibration_uncertainty: Whether the **inversion-side** likelihoods score their own
+            calibration as the coherent systematic doc 06 §4.1 says it is, rather than
+            asserting the scale is known exactly.
+
+            This is the switch the whole four-channel exercise exists to make survivable.
+            Doc 00 §5.1's criterion S4 — "an uncalibrated posterior is worse than no
+            posterior" — is failed by asserting a 6 %-uncertain radiometric scale is exactly
+            1.0. But turning it on with OES alone does not produce a wider honest interval;
+            it produces **no** interval, because with honest calibration uncertainty a
+            single optical line cannot identify the density at all. Overall brightness
+            carries essentially all of OES's density information, so "the plasma is 6 %
+            denser" and "the lamp reads 6 % bright" are the same data, and the posterior
+            comes back singular — doc 05 §6's null space, appearing correctly. Thomson and
+            interferometry are here because they measure density through physics that has no
+            radiometric lamp in it at all: a Rayleigh-calibrated photon count and a phase
+            shift that depends on ``n_e`` alone.
+
+            Left ``False`` by default for the reason
+            :meth:`~vpl.instruments.oes.instrument.OesInstrument.likelihood`'s own docstring
+            gives: T0 and T1 are published regression baselines and a flipped default
+            silently re-scores every existing caller.
+        truth_eedf_factory: The EEDF the **truth's** OES measurement is generated with.
+            ``None`` means the same Maxwellian the inversion assumes, so there is no EEDF
+            mismatch. T2 supplies ``closed_loop._t2_truth_eedf_factory``; without this
+            parameter a four-channel T2 would silently generate its OES data with the wrong
+            (matched) EEDF and quietly drop one of doc 05 §7.1's mismatch axes.
         lif_z_index: Which spatial grid point the LIF measurement volume sits at.
 
             Defaults to the outermost point, where the L0 profile has relaxed to the
@@ -611,15 +946,21 @@ def build_channels(
 
     resolved = registry if registry is not None else default_registry()
     z_index = reference_state.grid.n_points - 1 if lif_z_index is None else lif_z_index
+    resolved_truth_eedf_factory = (
+        _maxwellian_eedf_factory if truth_eedf_factory is None else truth_eedf_factory
+    )
 
-    truth_oes = _oes_instrument(seed=seed, registry=resolved, eedf_factory=_maxwellian_eedf_factory)
+    truth_oes = _oes_instrument(
+        seed=seed, registry=resolved, eedf_factory=resolved_truth_eedf_factory
+    )
     truth_oes.calibrate(_calibration_set(resolved))
     truth_oes.set_noise_enabled(noise)
     if not imperfect_calibration:
         truth_oes.use_true_calibration()
 
-    inversion_oes = _oes_instrument(
-        seed=seed, registry=resolved, eedf_factory=_maxwellian_eedf_factory
+    inversion_oes = _OesWithCalibrationUncertainty(
+        _oes_instrument(seed=seed, registry=resolved, eedf_factory=_maxwellian_eedf_factory),
+        calibration_uncertainty=calibration_uncertainty,
     )
 
     truth_lif = _lif_instrument(
@@ -636,13 +977,49 @@ def build_channels(
         seed=seed,
         registry=resolved,
         imperfect_calibration=False,
+        calibration_uncertainty=calibration_uncertainty,
+    )
+
+    thomson = build_thomson_channel(
+        reference_state=reference_state,
+        seed=seed,
+        registry=resolved,
+        noise=noise,
+        imperfect_calibration=imperfect_calibration,
+        z_index=thomson_z_index,
+    )
+    # The two campaign-level switches Thomson's own builder does not own: doc 01 IF-6's
+    # positional half of the gate (see _ThomsonOutsideTheSheath) and whether this campaign
+    # scores calibration coherently. Both are properties of the run rather than of the
+    # channel, which is why they are bound here alongside every other channel's.
+    thomson = replace(
+        thomson,
+        inversion=_ThomsonOutsideTheSheath(
+            thomson.inversion,
+            z_pin_m=float(reference_state.grid.z_m[thomson.z_index]),
+            solver=AnalyticSheathSolver(),
+            calibration_uncertainty=calibration_uncertainty,
+        ),
+    )
+    interferometry = build_interferometry_channel(
+        reference_state=reference_state,
+        seed=seed,
+        registry=resolved,
+        noise=noise,
+        imperfect_calibration=imperfect_calibration,
+        calibration_uncertainty=calibration_uncertainty,
+        start_z_m=interferometry_start_z_m,
     )
 
     return ChannelSet(
         oes_window=_acquisition_window(resolved),
         lif_window=_lif_acquisition_window(resolved),
+        thomson_window=thomson.window,
+        interferometry_window=interferometry.window,
         _truth_oes=truth_oes,
         _truth_lif=truth_lif,
         _oes=inversion_oes,
         _lif=inversion_lif,
+        _thomson=thomson,
+        _interferometry=interferometry,
     )

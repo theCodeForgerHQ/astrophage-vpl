@@ -458,3 +458,71 @@ class TestAssumedStrayLightPedestalAffectsObserve:
 
         assert np.all(default_uncertainty >= zeroed_uncertainty)
         assert np.any(default_uncertainty > zeroed_uncertainty)
+
+
+class TestTheCoherentCalibrationTerm:
+    """doc 06 §5's Rayleigh chain, scored as the coherent systematic doc 06 §4.1 says it is.
+
+    This module's own docstring already quotes doc 06 §4.1 on the *drawn coefficient* — "a
+    single Rayleigh calibration error affects every Thomson point identically and does not
+    average down" — but until ``calibration_uncertainty`` existed the **likelihood** did not
+    act on that at all: it asserted the absolute count scale was exactly 1.0, which is
+    infinite confidence in a ~6.6 % quantity. That is the same defect
+    ``vpl.instruments.coherent`` was written to make unrepeatable on OES and LIF, on a
+    channel whose calibration chain is no better than OES's.
+    """
+
+    def _observation_and_prediction(self) -> tuple[object, object]:
+        state = _state()
+        instrument = ThomsonInstrument(root_seed=17)
+        instrument.configure(InstrumentConfig(values={}))
+        instrument.calibrate(_references())
+        instrument.set_noise_enabled(True)
+        return instrument.observe(state, _RP1_WINDOW), instrument.forward(state, _RP1_WINDOW)
+
+    def test_the_flag_defaults_off_and_reproduces_the_poisson_term_bit_for_bit(self) -> None:
+        # The load-bearing property: every existing caller of this method — and every
+        # published regression baseline scored through it — must be unaffected by an option
+        # only opt-in callers asked for. Exact equality, not allclose: "close" would let a
+        # refactor of the Poisson branch through unnoticed.
+        observed, predicted = self._observation_and_prediction()
+        instrument = ThomsonInstrument(root_seed=17)
+        instrument.configure(InstrumentConfig(values={}))
+
+        assert instrument.likelihood(
+            observed, predicted, calibration_uncertainty=False
+        ) == instrument.likelihood(observed, predicted)
+
+    def test_scoring_the_calibration_coherently_changes_the_answer(self) -> None:
+        observed, predicted = self._observation_and_prediction()
+        instrument = ThomsonInstrument(root_seed=17)
+        instrument.configure(InstrumentConfig(values={}))
+
+        without = instrument.likelihood(observed, predicted)
+        with_term = instrument.likelihood(observed, predicted, calibration_uncertainty=True)
+
+        # Not merely different — the whole point is that admitting a 6.6 % coherent
+        # uncertainty must make the fit *less* discriminating, never more. A term that
+        # tightened the likelihood would be the mean-variance coupling artefact
+        # `closed_loop` records, not a calibration budget.
+        assert with_term != without
+        assert np.isfinite(with_term)
+
+    def test_a_true_calibration_measurement_is_a_no_op(self) -> None:
+        # doc 04 §7.3 permits the true response "for verification", and a run that used it
+        # has no calibration error to score. The guard is on the measurement's own record
+        # rather than on the caller remembering, so this must hold without the caller
+        # having to drop the flag.
+        state = _state()
+        instrument = ThomsonInstrument(root_seed=17)
+        instrument.configure(InstrumentConfig(values={}))
+        instrument.calibrate(_references())
+        instrument.use_true_calibration()
+        instrument.set_noise_enabled(True)
+        observed = instrument.observe(state, _RP1_WINDOW)
+        predicted = instrument.forward(state, _RP1_WINDOW)
+
+        assert observed.calibration is CalibrationState.TRUE
+        assert instrument.likelihood(
+            observed, predicted, calibration_uncertainty=True
+        ) == instrument.likelihood(observed, predicted)

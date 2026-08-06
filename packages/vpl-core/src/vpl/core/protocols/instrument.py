@@ -37,7 +37,7 @@ import math
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeAlias, runtime_checkable
 
 from vpl.core.protocols.config import InstrumentConfig
 from vpl.core.protocols.metadata import InstrumentMetadata
@@ -71,7 +71,7 @@ __all__ = [
 #: base is fixed at ``e`` across every engine in doc 05 §5.
 #:
 #: ``-inf`` is legal and meaningful: a proposal that violates a hard constraint.
-type LogProb = float
+LogProb: TypeAlias = float
 
 
 def _required_text(value: str, *, what: str) -> str:

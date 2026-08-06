@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, replace
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -125,7 +125,7 @@ __all__ = [
 ]
 
 #: A field sampled on the spatial grid, in SI magnitudes.
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 _REGISTRY: Final = default_registry()
 

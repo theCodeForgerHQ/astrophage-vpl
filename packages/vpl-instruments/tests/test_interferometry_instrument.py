@@ -33,8 +33,10 @@ from vpl.core.state import (
     TimeGrid,
 )
 from vpl.core.units import Q_
+from vpl.instruments.interferometry import instrument as interferometry_instrument_module
 from vpl.instruments.interferometry import noise as interferometry_noise
 from vpl.instruments.interferometry.instrument import (
+    INTERFEROMETER_PHASE_SCALE_QUANTITY,
     PHASE_UNITS,
     InterferometryInstrument,
 )
@@ -506,3 +508,116 @@ class TestVibrationModelIsReadFromTheRegistry:
         )
 
         assert moved_sigma != pytest.approx(default_sigma)
+
+
+class TestThePublicPhaseScaleQuantityExport:
+    """The one-line export ``vpl.experiment.channels_interferometry`` needs to build a
+    :class:`~vpl.core.protocols.instrument.CalibrationSet` :meth:`InterferometryInstrument.
+    calibrate` will accept — doc 08 §4."""
+
+    def test_the_public_name_matches_the_private_alias_and_the_original_value(self) -> None:
+        assert INTERFEROMETER_PHASE_SCALE_QUANTITY == "interferometer_phase_scale"
+        assert (
+            interferometry_instrument_module._PHASE_SCALE_QUANTITY
+            == INTERFEROMETER_PHASE_SCALE_QUANTITY
+        )
+
+    def test_the_public_name_is_in_all(self) -> None:
+        assert "INTERFEROMETER_PHASE_SCALE_QUANTITY" in interferometry_instrument_module.__all__
+
+
+class TestCalibrationUncertaintyLikelihood:
+    """doc 06 §4.1, doc 04 §7.3: the phase-scale calibration scored as the coherent
+    systematic it is, rather than asserted exact.
+
+    Added alongside the OES and LIF fixes ``vpl.instruments.coherent``'s module docstring
+    describes as "found and fixed independently in four places" — checked here and found to
+    be the same defect, one order of magnitude smaller (0.5 %-class against OES's registered
+    6 %).
+    """
+
+    def test_the_default_reproduces_the_pre_existing_likelihood_bit_for_bit(self) -> None:
+        instrument = _configured()
+        instrument.calibrate(_references())
+        observed = instrument.observe(_state(), _WINDOW)
+        predicted = observed.as_observable()
+
+        explicit_default = instrument.likelihood(observed, predicted, calibration_uncertainty=False)
+        omitted_default = instrument.likelihood(observed, predicted)
+
+        # Exact equality, not allclose: this is the regression baseline the amendment must
+        # not perturb for any existing caller that never passes the new keyword.
+        assert explicit_default == omitted_default
+
+    def test_calibration_uncertainty_without_calibrate_is_refused(self) -> None:
+        # noise=False: forward()/observe() agree with no calibration chain at all, but
+        # scoring the calibration coherently needs the standard's registered uncertainty,
+        # which only calibrate() records — see the method's own docstring for why there is
+        # no registry entry to fall back to instead.
+        instrument = _configured(noise=False)
+        observed = instrument.observe(_state(), _WINDOW)
+        predicted = observed.as_observable()
+
+        with pytest.raises(RuntimeError, match="calibrate"):
+            instrument.likelihood(observed, predicted, calibration_uncertainty=True)
+
+    def test_calibration_uncertainty_is_a_noop_for_a_true_calibration_measurement(self) -> None:
+        # No calibrate() call anywhere in this test: use_true_calibration() alone must be
+        # enough, because doc 04 §7.3's verification runs have no calibration error to
+        # score, and the gate is on the measurement's own CalibrationState.
+        instrument = _configured()
+        instrument.use_true_calibration()
+        observed = instrument.observe(_state(), _WINDOW)
+        predicted = observed.as_observable()
+        assert observed.calibration is CalibrationState.TRUE
+
+        without_flag = instrument.likelihood(observed, predicted)
+        with_flag = instrument.likelihood(observed, predicted, calibration_uncertainty=True)
+
+        assert with_flag == without_flag
+
+    def test_calibration_uncertainty_changes_the_score_for_an_estimated_calibration(
+        self,
+    ) -> None:
+        instrument = _configured()
+        instrument.calibrate(_references())
+        observed = instrument.observe(_state(), _WINDOW)
+        predicted = observed.as_observable()
+        assert observed.calibration is CalibrationState.ESTIMATED
+
+        without = instrument.likelihood(observed, predicted, calibration_uncertainty=False)
+        with_term = instrument.likelihood(observed, predicted, calibration_uncertainty=True)
+
+        assert with_term != without
+
+    def test_calibration_uncertainty_matches_the_shared_coherent_kernel_computed_independently(
+        self,
+    ) -> None:
+        # Not just "differs in the right direction" — this is the k=2 Woodbury result,
+        # reconstructed here from the public vpl.instruments.coherent building blocks and
+        # compared to what the method itself returned, so the method's internal composition
+        # cannot silently disagree with the shared kernel it claims to be built from.
+        from vpl.instruments.coherent import (
+            coherent_gaussian_log_prob,
+            fractional_calibration_row,
+            stack_coherent_rows,
+        )
+
+        instrument = _configured()
+        instrument.calibrate(_references())
+        observed = instrument.observe(_state(), _WINDOW)
+        predicted = observed.as_observable()
+
+        with_term = instrument.likelihood(observed, predicted, calibration_uncertainty=True)
+
+        residual = observed.values - predicted.values
+        sigma_independent = interferometry_noise.independent_phase_std_rad()
+        sigma_common = interferometry_noise.vibration_phase_std_rad(_WINDOW.duration_s)
+        d = np.full(residual.size, sigma_independent**2)
+        v = np.full(residual.size, sigma_common)
+        calibration_row = fractional_calibration_row(predicted.values, relative_uncertainty=0.02)
+        basis = stack_coherent_rows([v, calibration_row], expected_shape=(residual.size,))
+        assert basis is not None
+        expected = coherent_gaussian_log_prob(residual=residual, variance=d, basis=basis)
+
+        assert with_term == pytest.approx(expected, rel=1.0e-12)

@@ -47,6 +47,7 @@ Both are keyword arguments so that a manifest can record what was used.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -68,7 +69,7 @@ __all__ = [
     "kinetics_from_set",
 ]
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 #: What to do above the tabulated range. See the module docstring: refusing.
 DEFAULT_ABOVE_GRID: ExtrapolationPolicy = DEFAULT_ABOVE

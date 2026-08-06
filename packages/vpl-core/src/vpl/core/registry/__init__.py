@@ -33,7 +33,7 @@ from collections.abc import Mapping
 from enum import StrEnum
 from importlib.metadata import EntryPoint, entry_points
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeAlias
 
 __all__ = [
     "GroupLike",
@@ -65,7 +65,7 @@ class PluginGroup(StrEnum):
 
 
 #: A group named either as a member or as the raw string a manifest carries.
-type GroupLike = PluginGroup | str
+GroupLike: TypeAlias = PluginGroup | str
 
 
 class PluginError(Exception):

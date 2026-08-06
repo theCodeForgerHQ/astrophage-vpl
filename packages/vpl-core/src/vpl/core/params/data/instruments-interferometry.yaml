@@ -107,3 +107,26 @@
   class: ASSUMED
   affects: [interferometry.vibration_noise]
   category: instrument
+
+- id: IF.phase_scale_uncertainty
+  description: >-
+    One-sigma relative uncertainty of the interferometer's phase-scale calibration — the
+    AOM frequency reference and path-length metrology chain of doc 02 §8.1. INVENTED, and
+    registered here rather than left as a literal after it was introduced at 0.005 with no
+    source. doc 02 §11's instrument table is the only figure anywhere in the documents: it
+    quotes 3 % for "AOM offset, known path", but qualifies it "(vibration-limited)" — and
+    vibration is already modelled separately in interferometry/noise.py, so quoting 3 %
+    here would double-count it. The scale term proper is therefore genuinely unsourced.
+    0.03 is used as the conservative stand-in rather than the original 0.005, because the
+    only documented number is 3 % and an invented value must not be the one that flatters
+    the channel it belongs to.
+    RETIREMENT: a calibration record for the AOM frequency reference and the path-length
+    metrology separated from the vibration term — i.e. a bench measurement of the phase
+    scale with the interferometer at rest.
+  value: 0.03
+  units: dimensionless
+  class: ASSUMED
+  source: "doc 02 §11 (3 %, vibration-limited); scale term not separately documented"
+  sweep_range: [0.005, 0.06]
+  affects: [inverse.posterior_width, interferometry.phase_scale]
+  category: instrument

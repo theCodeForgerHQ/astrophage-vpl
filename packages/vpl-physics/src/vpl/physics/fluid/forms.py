@@ -47,7 +47,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 import ufl
@@ -79,10 +79,10 @@ __all__ = [
 ]
 
 #: A field sampled on a grid, in SI magnitudes.
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 #: A source term, evaluated on an array of positions in metres.
-type SourceTerm = Callable[[FloatArray], FloatArray]
+SourceTerm: TypeAlias = Callable[[FloatArray], FloatArray]
 
 #: How many degrees above the solution space a manufactured or physical source term is
 #: represented in. Two is enough that the source's own representation error is ``O(h^4)``

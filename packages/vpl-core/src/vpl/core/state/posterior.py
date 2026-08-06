@@ -40,7 +40,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, NamedTuple, Self
+from typing import Final, NamedTuple, Self, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -88,7 +88,7 @@ DEFAULT_CREDIBLE_LEVEL: Final[float] = 0.95
 #: Quantities that are functions of the samples rather than samples themselves, keyed by
 #: name. Doc 05 §10 requires ``Gamma_E(z, t)``, ``Gamma_i``, ``<E_i>`` and the wall IEDF
 #: in every emitted posterior. Each array's first two axes are ``(chain, draw)``.
-type DerivedQuantities = Mapping[str, NDArray[np.float64]]
+DerivedQuantities: TypeAlias = Mapping[str, NDArray[np.float64]]
 
 
 class ParameterLevel(StrEnum):

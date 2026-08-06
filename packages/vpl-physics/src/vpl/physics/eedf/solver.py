@@ -112,7 +112,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -137,7 +137,7 @@ __all__ = [
     "TwoTermSolver",
 ]
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 # ── constants ───────────────────────────────────────────────────────────────────
 #

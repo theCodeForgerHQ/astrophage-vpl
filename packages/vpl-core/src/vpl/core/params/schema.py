@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import pint
 
@@ -44,7 +44,7 @@ _SOURCED_CLASSES = frozenset(
     {ProvenanceClass.MEASURED, ProvenanceClass.PUBLISHED, ProvenanceClass.SPEC}
 )
 
-type UncertaintyKind = Literal["relative", "absolute"]
+UncertaintyKind: TypeAlias = Literal["relative", "absolute"]
 
 _UNCERTAINTY_KINDS: frozenset[str] = frozenset({"relative", "absolute"})
 

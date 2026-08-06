@@ -41,7 +41,7 @@ testable without a PDE stack.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -56,7 +56,7 @@ __all__ = [
 ]
 
 #: A field sampled on a grid, in SI magnitudes.
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 #: Below this ``|x|`` the Bernoulli function is evaluated from its Taylor series.
 #:

@@ -40,7 +40,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import cast
+from typing import TypeAlias, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -62,7 +62,7 @@ __all__ = [
 #: instrument"). A bare string rather than an enum, because doc 00 E1 requires new
 #: instruments to be plugins discovered at runtime — a closed enum would need editing in
 #: the core every time one is added, which is the coupling that requirement forbids.
-type InstrumentId = str
+InstrumentId: TypeAlias = str
 
 #: The origin of the shared latent time base of doc 05 §3.2. A phase-locked window is
 #: defined by its bin, not by when the accumulation happened to begin, so it defaults its

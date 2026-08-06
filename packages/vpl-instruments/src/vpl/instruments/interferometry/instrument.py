@@ -126,6 +126,11 @@ from vpl.core.state import (
     ScalarField,
 )
 from vpl.core.units import Q_
+from vpl.instruments.coherent import (
+    coherent_gaussian_log_prob,
+    fractional_calibration_row,
+    stack_coherent_rows,
+)
 from vpl.instruments.interferometry import noise
 from vpl.instruments.interferometry.phase import (
     CHAMBER_DIAMETER_M,
@@ -137,7 +142,12 @@ from vpl.instruments.interferometry.phase import (
     net_phase_shift_rad,
 )
 
-__all__ = ["INTERFEROMETRY_INSTRUMENT_ID", "PHASE_UNITS", "InterferometryInstrument"]
+__all__ = [
+    "INTERFEROMETER_PHASE_SCALE_QUANTITY",
+    "INTERFEROMETRY_INSTRUMENT_ID",
+    "PHASE_UNITS",
+    "InterferometryInstrument",
+]
 
 type FloatArray = NDArray[np.float64]
 
@@ -160,7 +170,14 @@ _DEFAULT_START_Z_M: Final[float] = 0.0
 #: metrology chain (doc 02 §8.1), not by anything radiometric, so this is a distinct
 #: calibration quantity from the other channels' — see doc 01 SYS-3's "single documented
 #: reference source per chain".
-_PHASE_SCALE_QUANTITY: Final[str] = "interferometer_phase_scale"
+#:
+#: Public: the experiment layer needs this name to build the
+#: :class:`~vpl.core.protocols.instrument.CalibrationSet` that :meth:`calibrate` requires,
+#: so it cannot stay private the way an instrument's own internal-only constants can.
+INTERFEROMETER_PHASE_SCALE_QUANTITY: Final[str] = "interferometer_phase_scale"
+
+#: Private alias, kept so every call site inside this module can stay unchanged.
+_PHASE_SCALE_QUANTITY: Final[str] = INTERFEROMETER_PHASE_SCALE_QUANTITY
 
 
 def _as_float(value: object, *, default: float, key: str) -> float:
@@ -462,19 +479,85 @@ class InterferometryInstrument:
 
     # ── the likelihood and the gate ─────────────────────────────────────────────
 
-    def likelihood(self, obs: Measurement, pred: Observable) -> LogProb:
+    def likelihood(
+        self,
+        obs: Measurement,
+        pred: Observable,
+        *,
+        calibration_uncertainty: bool = False,
+    ) -> LogProb:
         """The correlated-Gaussian term of doc 05 §3.2 — see the module docstring.
 
-        Builds ``Sigma = D + v v^T`` (``D`` independent per-chord variance, ``v`` the
-        common-mode vibration standard deviation broadcast across chords) and applies
-        the rank-one Sherman-Morrison identity:
+        With ``calibration_uncertainty=False`` (the default), builds
+        ``Sigma = D + v v^T`` (``D`` independent per-chord variance, ``v`` the common-mode
+        vibration standard deviation broadcast across chords) and applies the rank-one
+        Sherman-Morrison identity:
 
             r' Sigma^-1 r  =  r'D^-1 r - (v'D^-1 r)^2 / (1 + v'D^-1 v)
             log|Sigma|     =  log|D| + log(1 + v'D^-1 v)
 
         the ``k = 1`` case of the general Woodbury identity
         :class:`~vpl.instruments.oes.instrument.OesInstrument.likelihood` documents in
-        full for its own rank-``k`` discrepancy term.
+        full for its own rank-``k`` discrepancy term. This path is untouched by the
+        ``calibration_uncertainty`` argument and reproduces exactly what this method
+        computed before that argument existed — the T0/T1-style regression baselines this
+        channel is folded into depend on that being bit for bit, not merely close.
+
+        Args:
+            obs: The measurement.
+            pred: The prediction to score it against.
+            calibration_uncertainty: Whether to score the doc 04 §7.3 AOM/path-length
+                phase-scale calibration as the coherent systematic it is — see
+                **Calibration** below.
+
+        Calibration — doc 04 §7.3, doc 06 §4.1:
+            :meth:`observe` applies the phase-scale calibration as ``values = scale *
+            predicted + ...`` (see its docstring), but nothing before this argument
+            existed put that scale's uncertainty into the covariance this method scores
+            against: the likelihood asserted the scale was exactly 1.0, infinite
+            confidence in a quantity the calibrating experiment layer registers at a few
+            tenths of a percent — the same class of defect
+            :mod:`vpl.instruments.coherent`'s module docstring names for OES and LIF, an
+            order of magnitude smaller here. Doc 06 §4.1: a correlated
+            calibration error "affects *every* point identically and does **not** average
+            down" — a fractional error on the whole prediction, ``f * y_hat``, which is
+            exactly :func:`~vpl.instruments.coherent.fractional_calibration_row`'s shape.
+
+            Enabled, the vibration term ``v`` and the calibration row are stacked into one
+            ``(2, n)`` coherent basis via
+            :func:`~vpl.instruments.coherent.stack_coherent_rows` and scored in one call to
+            :func:`~vpl.instruments.coherent.coherent_gaussian_log_prob` against the
+            independent detector variance ``D`` alone — the ``k = 2`` case of the same
+            Woodbury identity the ``False`` path specialises to ``k = 1`` by hand, not a
+            second, independently-derived path that could disagree with it.
+
+            **Where the uncertainty figure comes from.** Unlike ``OES-C1.radiometric_
+            uncertainty`` and ``LIF.scale_uncertainty``, there is no registered
+            ``IF.phase_scale_uncertainty`` entry this method can read on its own — see
+            :mod:`vpl.experiment.channels_interferometry`'s module docstring for why that
+            number is not registered. So this method reads it from :attr:`_calibration`
+            (the standard's own ``relative_uncertainty``, recorded by :meth:`calibrate`)
+            rather than from the registry directly, which means ``calibrate()`` must have
+            run first — even on an instrument that will go on to call
+            :meth:`use_true_calibration` for its predictions, purely so this figure is on
+            hand. This is a genuine, stated deviation from the OES/LIF convention of a
+            registry lookup that needs no calibration object, made necessary by the gap
+            rather than chosen for its own sake.
+
+            **Why opt-in rather than always on**, and **why a ``CalibrationState.TRUE``
+            measurement is a no-op**: identical reasoning to
+            :meth:`~vpl.instruments.oes.instrument.OesInstrument.likelihood`'s own
+            "Calibration" section — a flipped default would silently re-score every
+            existing caller's posterior, and a verification run that used the true
+            response has no calibration error to score.
+
+        Raises:
+            RuntimeError: If ``calibration_uncertainty=True`` is requested for a
+                measurement that was not generated with the true calibration
+                (:attr:`~vpl.core.state.Measurement.calibration` is not
+                :attr:`~vpl.core.state.CalibrationState.TRUE`) and :meth:`calibrate` has
+                not been called, so there is no registered uncertainty to build the
+                coherent row from.
         """
         if obs.shape != pred.shape:
             raise ValueError(
@@ -494,16 +577,35 @@ class InterferometryInstrument:
         d = np.full(n, sigma_independent**2, dtype=np.float64)
         v = np.full(n, sigma_common, dtype=np.float64)
 
-        d_inv_r = residual / d
-        d_inv_v = v / d
-        quad_diag = float(residual @ d_inv_r)
-        vt_dinv_v = float(v @ d_inv_v)
-        vt_dinv_r = float(v @ d_inv_r)
-        m = 1.0 + vt_dinv_v
-        quadratic = quad_diag - (vt_dinv_r**2) / m
+        if not (calibration_uncertainty and obs.calibration is not CalibrationState.TRUE):
+            # The pre-existing bespoke Sherman-Morrison path — untouched, bit for bit.
+            d_inv_r = residual / d
+            d_inv_v = v / d
+            quad_diag = float(residual @ d_inv_r)
+            vt_dinv_v = float(v @ d_inv_v)
+            vt_dinv_r = float(v @ d_inv_r)
+            m = 1.0 + vt_dinv_v
+            quadratic = quad_diag - (vt_dinv_r**2) / m
 
-        log_det = float(np.sum(np.log(d))) + math.log(m)
-        return float(-0.5 * quadratic - 0.5 * log_det - 0.5 * n * math.log(2.0 * math.pi))
+            log_det = float(np.sum(np.log(d))) + math.log(m)
+            return float(-0.5 * quadratic - 0.5 * log_det - 0.5 * n * math.log(2.0 * math.pi))
+
+        if self._calibration is None:
+            raise RuntimeError(
+                f"{self.instrument_id}: calibration_uncertainty=True needs calibrate() to "
+                "have been called first — that is where the phase-scale standard's "
+                "registered relative_uncertainty comes from (see this method's "
+                "docstring for why there is no registry entry to read it from instead). "
+                "use_true_calibration() alone does not supply it."
+            )
+        calibration_row = fractional_calibration_row(
+            np.asarray(pred.values, dtype=np.float64),
+            relative_uncertainty=self._calibration.relative_uncertainty["phase_scale"],
+        )
+        basis = stack_coherent_rows([v, calibration_row], expected_shape=(n,))
+        if basis is None:
+            raise AssertionError("unreachable: two non-empty coherent rows were just supplied")
+        return coherent_gaussian_log_prob(residual=residual, variance=d, basis=basis)
 
     def is_informative(self, state_guess: PlasmaParams) -> bool:
         """The doc 01 IF-6 gate: whether ``n_0`` is at or above this chord's floor."""

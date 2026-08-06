@@ -68,7 +68,7 @@ from __future__ import annotations
 
 import math
 from enum import StrEnum
-from typing import Final
+from typing import Final, TypeAlias
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -86,7 +86,7 @@ __all__ = [
     "maxwellian_eedf",
 ]
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 #: ``kappa = 1``: ``f0 ~ exp(-eps/T_e)``. The shape the Boltzmann-electron relation of
 #: doc 03 §3.1 assumes, and the shape doc 03 §3.2 says the sheath does not have.

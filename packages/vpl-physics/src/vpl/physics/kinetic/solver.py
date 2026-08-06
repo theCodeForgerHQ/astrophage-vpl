@@ -91,7 +91,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from typing import Final
+from typing import Final, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -195,7 +195,7 @@ __all__ = [
     "PicRun",
 ]
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 _E: Final[float] = float(magnitude_in(ELEMENTARY_CHARGE, "C"))
 _M_E: Final[float] = float(magnitude_in(ELECTRON_MASS, "kg"))

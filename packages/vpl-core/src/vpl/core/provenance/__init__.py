@@ -30,7 +30,7 @@ from enum import StrEnum
 from importlib.metadata import distributions
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Self
+from typing import Final, Self, TypeAlias, TypeVar
 
 from vpl import core as _core
 
@@ -53,13 +53,21 @@ __all__ = [
 UNKNOWN_COMMIT: Final[str] = "unknown"
 
 #: Anything a manifest may hold once loaded from YAML.
-type ManifestValue = (
-    str | int | float | bool | Sequence[ManifestValue] | Mapping[str, ManifestValue] | None
+#:
+#: Quoted because the alias is *recursive* — see the identical note on
+#: :data:`vpl.core.protocols.config.ConfigValue`. A ``TypeAlias`` assignment evaluates its
+#: right-hand side eagerly, so ``ManifestValue`` must be forward-referenced as a string.
+ManifestValue: TypeAlias = (
+    "str | int | float | bool | Sequence[ManifestValue] | Mapping[str, ManifestValue] | None"
 )
 
 #: Anything a serialised provenance record may hold: the types HDF5 attributes and YAML
 #: sidecars carry without a custom representer (doc 08 §7).
-type ProvenanceValue = str | bool | int | dict[str, str]
+ProvenanceValue: TypeAlias = str | bool | int | dict[str, str]
+
+#: The enum coerced by :func:`_parse_enum`. The pre-PEP-695 spelling of
+#: ``def _parse_enum[E: StrEnum]``.
+E = TypeVar("E", bound=StrEnum)
 
 _SHA256_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 
@@ -266,7 +274,7 @@ def environment_lock_hash(repo_root: Path | None = None) -> tuple[str, Environme
 # ── field parsing ────────────────────────────────────────────────────────────────────
 
 
-def _parse_enum[E: StrEnum](value: str | E, enum_cls: type[E], name: str) -> E:
+def _parse_enum(value: str | E, enum_cls: type[E], name: str) -> E:
     """Coerce to a member of ``enum_cls``, naming the field in the failure."""
     try:
         return enum_cls(value)

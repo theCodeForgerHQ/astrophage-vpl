@@ -116,6 +116,11 @@ from vpl.core.state import (
     ScalarField,
 )
 from vpl.core.units import Q_, magnitude_in
+from vpl.instruments.coherent import (
+    coherent_gaussian_log_prob,
+    fractional_calibration_row,
+    stack_coherent_rows,
+)
 from vpl.instruments.thomson import photons, spectrum
 from vpl.instruments.thomson.spectrum import LASER_WAVELENGTH_NM
 
@@ -481,7 +486,13 @@ class ThomsonInstrument:
 
     # ── the likelihood and the gate ─────────────────────────────────────────────
 
-    def likelihood(self, obs: Measurement, pred: Observable) -> LogProb:
+    def likelihood(
+        self,
+        obs: Measurement,
+        pred: Observable,
+        *,
+        calibration_uncertainty: bool = False,
+    ) -> LogProb:
         """This channel's Poisson term in the doc 05 §3.2 sum — doc 05 §3.1: "Poisson for
         Thomson", unconditionally (unlike OES's bright/faint switch): doc 02 §7.1's
         0.008 pe/channel/shot at RP-1 means the bright-pixel regime that switch exists
@@ -493,6 +504,47 @@ class ThomsonInstrument:
         needed before comparing them as counts — unlike
         :meth:`~vpl.instruments.oes.instrument.OesInstrument.likelihood`, which has to
         convert radiance back to counts using the pixel bandpass and etendue first.
+
+        Args:
+            obs: The measurement.
+            pred: The prediction to score it against.
+            calibration_uncertainty: Whether to score the doc 02 §7.3 Rayleigh calibration
+                as the coherent systematic it is — see **Calibration** below.
+
+        Calibration — doc 06 §5, doc 06 §4.1:
+            :meth:`calibrate` draws a ``count_scale`` from the Rayleigh standard, and this
+            module's own docstring already quotes doc 06 §4.1 on why it is drawn once and
+            kept: "a single Rayleigh calibration error affects *every* Thomson point
+            identically and does **not** average down". Until this argument existed, the
+            *likelihood* did not act on that at all — it asserted the absolute count scale
+            was exactly 1.0, which is infinite confidence in a quantity
+            :data:`~vpl.instruments.thomson.photons.RAYLEIGH_CALIBRATION_RELATIVE_UNCERTAINTY`
+            puts at ~6.6 % one-sigma (doc 06 §5's five-term chain). That is the same defect
+            :mod:`vpl.instruments.coherent`'s module docstring records for OES and LIF, on a
+            channel whose calibration is no better than OES's.
+
+            Enabled, the calibration enters as one coherent row, ``f * y_hat`` — a fractional
+            error on the *whole* prediction, which is what a single absolute scale factor is
+            — and the channel switches to the correlated Gaussian ``D + U'U`` with ``D`` the
+            Poisson counting variance. Same reasoning
+            :meth:`~vpl.instruments.oes.instrument.OesInstrument.likelihood` gives for its
+            own switch: once a systematic dominates the counting statistics, mixing a Poisson
+            pmf with a correlated Gaussian is not a well-defined joint density, and the
+            Woodbury algebra is taken from :mod:`vpl.instruments.coherent` rather than
+            re-derived so this channel's treatment cannot drift from the other three's.
+
+            The uncertainty is read from the module constant, not from :attr:`_calibration`,
+            for the reason
+            :meth:`~vpl.instruments.oes.instrument.OesInstrument._radiometric_uncertainty`
+            gives: the likelihood is used by the *inversion*, which is deliberately
+            uncalibrated and holds no :class:`~vpl.core.protocols.instrument.Calibration` of
+            its own.
+
+            **Why opt-in**, and **why a ``CalibrationState.TRUE`` measurement is a no-op**:
+            identical reasoning to OES's own "Calibration" section — a flipped default would
+            silently re-score every existing caller's posterior, and doc 04 §7.3 permits the
+            true response "for verification", which leaves no calibration error to score. The
+            guard is on the measurement's own record rather than on the caller remembering.
         """
         if obs.shape != pred.shape:
             raise ValueError(
@@ -501,8 +553,33 @@ class ThomsonInstrument:
             )
         counts = np.maximum(np.rint(np.asarray(obs.values, dtype=np.float64)), 0.0)
         expected = np.maximum(np.asarray(pred.values, dtype=np.float64), np.finfo(np.float64).tiny)
-        poisson = counts * np.log(expected) - expected - special.gammaln(counts + 1.0)
-        return float(np.sum(poisson))
+
+        rows: list[FloatArray] = []
+        if calibration_uncertainty and obs.calibration is not CalibrationState.TRUE:
+            rows.append(
+                fractional_calibration_row(
+                    np.asarray(pred.values, dtype=np.float64),
+                    relative_uncertainty=photons.RAYLEIGH_CALIBRATION_RELATIVE_UNCERTAINTY,
+                )
+            )
+        # `None` here means nothing coherent was supplied, and the pre-existing Poisson
+        # likelihood is returned unchanged and bit for bit — which is what protects every
+        # existing caller of this method from a change only opt-in callers asked for.
+        basis = stack_coherent_rows(rows, expected_shape=expected.shape)
+        if basis is None:
+            poisson = counts * np.log(expected) - expected - special.gammaln(counts + 1.0)
+            return float(np.sum(poisson))
+
+        # Floor the counting variance at one photoelectron, exactly as
+        # `OesInstrument.likelihood`'s own coherent branch does and for the same reason: this
+        # branch is Gaussian on every channel, and a channel expecting ~0 counts would
+        # otherwise get weight 1/epsilon and dominate the whole likelihood. Same constant and
+        # same reasoning as `_MINIMUM_VARIANCE_COUNTS` above.
+        return coherent_gaussian_log_prob(
+            residual=(counts - expected).reshape(-1),
+            variance=np.maximum(expected.reshape(-1), _MINIMUM_VARIANCE_COUNTS),
+            basis=basis,
+        )
 
     def is_informative(self, state_guess: PlasmaParams) -> bool:
         """The doc 01 IF-6 gate — see the module docstring for why the transient-

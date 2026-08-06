@@ -96,7 +96,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeAlias
 
 import jax.numpy as jnp
 import numpy as np
@@ -129,7 +129,7 @@ __all__ = [
     "neutral_density_m3",
 ]
 
-type FloatArray = NDArray[np.float64]
+FloatArray: TypeAlias = NDArray[np.float64]
 
 _E: Final[float] = float(magnitude_in(ELEMENTARY_CHARGE, "C"))
 _K_B: Final[float] = float(magnitude_in(BOLTZMANN, "J/K"))

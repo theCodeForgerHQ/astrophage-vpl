@@ -61,7 +61,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final
+from typing import Final, TypeAlias, TypeVar
 
 __all__ = [
     "EVIDENCE_FAMILIES",
@@ -84,10 +84,15 @@ __all__ = [
 ]
 
 #: A requirement identifier from doc 01, in the canonical spelling of that document.
-type RequirementId = str
+RequirementId: TypeAlias = str
 
 #: A verification-test or benchmark identifier from docs 03, 04, 06 and 07.
-type EvidenceId = str
+EvidenceId: TypeAlias = str
+
+#: The decorated target of :func:`satisfies` and :func:`verified_by`. Both decorators
+#: return their argument unchanged, so the type variable exists only to carry the target's
+#: type through the decoration — the pre-PEP-695 spelling of ``def satisfies[T]``.
+T = TypeVar("T")
 
 
 class TraceabilityError(ValueError):
@@ -285,7 +290,7 @@ def _record_for(target: object) -> _Record:
     return _INDEX.setdefault(_target_key(target), _Record())
 
 
-def satisfies[T](*requirements: str) -> Callable[[T], T]:
+def satisfies(*requirements: str) -> Callable[[T], T]:
     """Declare which doc 01 requirements an implementation satisfies — doc 08 §9.
 
     Repeated application accumulates rather than replaces, because splitting a long claim
@@ -317,7 +322,7 @@ def satisfies[T](*requirements: str) -> Callable[[T], T]:
     return annotate
 
 
-def verified_by[T](*evidence: str) -> Callable[[T], T]:
+def verified_by(*evidence: str) -> Callable[[T], T]:
     """Declare which tests and benchmarks verify an implementation — doc 08 §9.
 
     Args:
