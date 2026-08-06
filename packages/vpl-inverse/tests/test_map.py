@@ -235,6 +235,48 @@ class TestTheResult:
             result.parameters.to_unconstrained(), result.unconstrained, rtol=1e-12
         )
 
+    def test_a_point_at_the_analytic_optimum_is_reported_as_converged(self) -> None:
+        # L-BFGS-B returns ABNORMAL_TERMINATION_IN_LNSRCH when its line search stops making
+        # progress, which at this module's deliberately tight gtol (1e-10) happens routinely
+        # once the *finite-difference* gradient hits its own noise floor around 1e-8 — at a
+        # point that is already the optimum to 1e-9. Reporting that as a failure is a false
+        # negative, and in an ensemble it is an expensive one: ~5 % of perfectly good cases
+        # get discarded, and vpl.validation.coverage refuses to report at all past a 10 %
+        # failure rate. `converged` must mean "this is a mode", not "scipy was happy".
+        rng = np.random.default_rng(9)
+        sigma, variance = 0.6, 2.0
+        false_negatives = 0
+
+        class P:
+            def log_prob_unconstrained(self, u: np.ndarray) -> float:
+                return float(-0.5 * u @ u / variance)
+
+        for _ in range(60):
+            truth = rng.normal(scale=np.sqrt(variance), size=3)
+            design = rng.normal(size=(6, 3))
+            observed = design @ truth + rng.normal(scale=sigma, size=6)
+
+            def log_likelihood(
+                u: np.ndarray, d: np.ndarray = design, o: np.ndarray = observed
+            ) -> float:
+                r = d @ u - o
+                return float(-0.5 * r @ r / sigma**2)
+
+            precision = design.T @ design / sigma**2 + np.eye(3) / variance
+            exact = np.linalg.solve(precision, design.T @ observed / sigma**2)
+
+            result = maximum_a_posteriori(
+                log_likelihood=log_likelihood, prior=P(), initial=np.zeros(3)
+            )
+            at_optimum = np.linalg.norm(result.unconstrained - exact) < 1e-6
+            if at_optimum and not result.converged:
+                false_negatives += 1
+
+        assert false_negatives == 0, (
+            f"{false_negatives} of 60 runs landed on the analytic optimum and were still "
+            "reported as not converged"
+        )
+
     def test_it_reports_whether_the_optimiser_converged(self) -> None:
         # A MAP that silently returns the iteration limit is how a bad fit becomes a
         # published number.

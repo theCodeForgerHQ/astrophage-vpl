@@ -96,6 +96,21 @@ _DEFAULT_MAX_ITERATIONS: Final[int] = 500
 #: alternative was to loosen the verification test until the default passed.
 _GRADIENT_TOLERANCE: Final[float] = 1e-10
 
+#: Gradient infinity-norm below which a point is certified a stationary point regardless of
+#: what the optimiser reported. L-BFGS-B returns ``ABNORMAL_TERMINATION_IN_LNSRCH`` when its
+#: line search stops making progress, and at the tolerance above that happens routinely once
+#: the **finite-difference** gradient reaches its own noise floor — which for
+#: :data:`_GRADIENT_STEP` and an O(1) objective is around 1e-8. The point is then already the
+#: optimum to ~1e-9, and calling it a failure is a false negative.
+#:
+#: That false negative is expensive rather than cosmetic: measured on 60 linear-Gaussian
+#: problems it fired on 3 of them, i.e. 5 % of an ensemble, and
+#: :mod:`vpl.validation.coverage` refuses to report coverage at all past a 10 % failure rate.
+#: So ``converged`` means "this is a mode", not "SciPy was happy". A saddle with a
+#: coincidentally small gradient is not admitted by this: the Hessian check in
+#: :func:`~vpl.inverse.laplace.laplace_posterior` rejects non-positive curvature separately.
+_STATIONARITY_TOLERANCE: Final[float] = 1e-6
+
 #: Relative function tolerance, tightened for the same reason. ``ftol`` is expressed by
 #: L-BFGS-B as a multiple of machine epsilon; this asks it to stop on the gradient rather
 #: than on a function-value plateau, which is the more meaningful criterion at an optimum.
@@ -295,7 +310,10 @@ def _result_at(
         else None
     )
     # A point the objective cannot evaluate is not an estimate, whatever the optimiser said.
-    healthy = converged and np.isfinite(value) and value < _OUT_OF_SUPPORT
+    # Conversely, a point whose gradient has vanished *is* a mode even when the optimiser
+    # reported an abnormal line-search termination — see _STATIONARITY_TOLERANCE.
+    stationary = bool(np.max(np.abs(gradient)) <= _STATIONARITY_TOLERANCE)
+    healthy = (converged or stationary) and np.isfinite(value) and value < _OUT_OF_SUPPORT
     return MapResult(
         unconstrained=u,
         parameters=parameters,
