@@ -347,9 +347,7 @@ class TestResampleOntoGrid:
         resampled = _resample_onto_grid(state, target)
 
         assert resampled.grid is target
-        np.testing.assert_allclose(
-            resampled.field("n_e").values, 1.0e15 + 1.0e14 * target.z_m
-        )
+        np.testing.assert_allclose(resampled.field("n_e").values, 1.0e15 + 1.0e14 * target.z_m)
         np.testing.assert_allclose(resampled.field("Phi").values, 10.0 * target.z_m)
         del species  # constructed only to keep params realistic; unused directly
 
@@ -399,9 +397,7 @@ class TestGenerateTruthWithAnalyticSolver:
 
         assert state.grid is grid
         expected = float(
-            magnitude_in(
-                ion_energy_flux(params, h_l=solver.h_l, gamma_i=solver.gamma_i), "W/m**2"
-            )
+            magnitude_in(ion_energy_flux(params, h_l=solver.h_l, gamma_i=solver.gamma_i), "W/m**2")
         )
         assert gamma_e == pytest.approx(expected)
         del species
@@ -434,9 +430,7 @@ class TestGeneralisedEedfProvider:
         provider = _GeneralisedEedf(grid=grid, kappa=DRUYVESTEYN_KAPPA)
 
         actual = provider.f0(electron_temperature_ev=3.0)
-        expected = grid.normalise(
-            druyvesteyn_eedf(grid.centres_ev, mean_energy_ev=1.5 * 3.0)
-        )
+        expected = grid.normalise(druyvesteyn_eedf(grid.centres_ev, mean_energy_ev=1.5 * 3.0))
 
         np.testing.assert_allclose(actual, expected)
 

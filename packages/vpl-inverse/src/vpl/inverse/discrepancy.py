@@ -106,9 +106,9 @@ from numpy.typing import ArrayLike, NDArray
 
 __all__ = [
     "DiscrepancyModel",
+    "EmpiricalDiscrepancy",
     "FractionalDiscrepancy",
     "NoDiscrepancy",
-    "EmpiricalDiscrepancy",
     "estimate_empirical_discrepancy",
     "estimate_hierarchy_discrepancy",
     "inflated_covariance",
