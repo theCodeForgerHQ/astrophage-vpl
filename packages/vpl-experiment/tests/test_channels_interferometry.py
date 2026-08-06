@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 from vpl.core.params import default_registry
-from vpl.core.state import PlasmaState
+from vpl.core.state import Measurement, PlasmaState
 from vpl.core.units import magnitude_in
 from vpl.experiment.channels_interferometry import (
     INTERFEROMETRY_CHANNEL,
@@ -514,3 +514,149 @@ class TestFusionIntegration:
 
         with pytest.raises(BlindChannelError, match="no channel is above its detection floor"):
             joint.detail(blind_state)
+
+
+class TestCoherentDiscrepancyAdapter:
+    """doc 05 §4's ``coherent_discrepancy`` term, pinned onto
+    ``_InterferometryWithOptionalCoherence`` the same way ``calibration_uncertainty`` is —
+    :class:`~vpl.inverse.fusion.Channel` calls ``instrument.likelihood(obs, pred)`` with no
+    keyword arguments, so the discrepancy has nowhere to travel except as constructor
+    state.
+    """
+
+    def test_default_is_bit_for_bit_identical_to_no_discrepancy(self) -> None:
+        no_discrepancy = build_interferometry_channel(
+            reference_state=_reference_state(), seed=_SEED, registry=default_registry()
+        )
+        explicit_none = build_interferometry_channel(
+            reference_state=_reference_state(),
+            seed=_SEED,
+            registry=default_registry(),
+            discrepancy=None,
+        )
+        state = _state(_operating_theta())
+        observed = no_discrepancy.truth.observe(state, no_discrepancy.window)
+        predicted = no_discrepancy.inversion.forward(state, no_discrepancy.window)
+
+        assert no_discrepancy.inversion.likelihood(
+            observed, predicted
+        ) == explicit_none.inversion.likelihood(observed, predicted)
+
+    def test_a_discrepancy_reaches_the_instrument_through_the_adapter(self) -> None:
+        state = _state(_operating_theta())
+        no_discrepancy = build_interferometry_channel(
+            reference_state=_reference_state(), seed=_SEED, registry=default_registry()
+        )
+        observed = no_discrepancy.truth.observe(state, no_discrepancy.window)
+        predicted = no_discrepancy.inversion.forward(state, no_discrepancy.window)
+        discrepancy_value = 0.1 * np.abs(np.asarray(predicted.values)) + 1.0e-8
+
+        with_discrepancy = build_interferometry_channel(
+            reference_state=_reference_state(),
+            seed=_SEED,
+            registry=default_registry(),
+            discrepancy=discrepancy_value,
+        )
+
+        via_adapter = with_discrepancy.inversion.likelihood(observed, predicted)
+        via_raw_off = with_discrepancy.inversion.instrument.likelihood(
+            observed, predicted, coherent_discrepancy=None
+        )
+        via_raw_on = with_discrepancy.inversion.instrument.likelihood(
+            observed, predicted, coherent_discrepancy=discrepancy_value
+        )
+
+        assert via_adapter == via_raw_on
+        assert via_adapter != via_raw_off
+
+    def test_a_discrepancy_widens_the_interval_through_the_adapter(self) -> None:
+        """doc 00 §5.1 S4's point, reproduced through the adapter: a discrepancy pinned at
+        build time must lower the curvature of the log-likelihood, never raise it."""
+        state = _state(_operating_theta())
+        no_discrepancy = build_interferometry_channel(
+            reference_state=_reference_state(), seed=_SEED, registry=default_registry()
+        )
+        observed = no_discrepancy.truth.observe(state, no_discrepancy.window)
+        predicted = no_discrepancy.inversion.forward(state, no_discrepancy.window)
+        discrepancy_value = 0.1 * np.abs(np.asarray(predicted.values)) + 1.0e-8
+
+        with_discrepancy = build_interferometry_channel(
+            reference_state=_reference_state(),
+            seed=_SEED,
+            registry=default_registry(),
+            discrepancy=discrepancy_value,
+        )
+
+        def curvature(built: InterferometryChannel) -> float:
+            step = 1.0e-4
+
+            def score(n0_factor: float) -> float:
+                perturbed_theta = _operating_theta().replace(n_0=_operating_theta().n_0 * n0_factor)
+                perturbed_pred = built.inversion.forward(_state(perturbed_theta), built.window)
+                return built.inversion.likelihood(observed, perturbed_pred)
+
+            centre = score(1.0)
+            up = score(1.0 + step)
+            down = score(1.0 - step)
+            return -(up - 2.0 * centre + down) / step**2
+
+        without = curvature(no_discrepancy)
+        with_term = curvature(with_discrepancy)
+
+        assert without > 0.0
+        assert with_term > 0.0
+        assert with_term < without
+
+    def test_matches_a_dense_covariance_via_scipy(self) -> None:
+        """The direct algebra check, at ``n = 1`` (the reframed channel's own scale): a
+        single-sample instance of the same rank-``k``-plus-vibration composition
+        ``InterferometryInstrument.likelihood``'s own test module checks at ``n = 8``."""
+        from scipy.stats import multivariate_normal
+
+        from vpl.instruments.interferometry import noise as if_noise
+
+        state = _state(_operating_theta())
+        no_discrepancy = build_interferometry_channel(
+            reference_state=_reference_state(), seed=_SEED, registry=default_registry()
+        )
+        predicted = no_discrepancy.inversion.forward(state, no_discrepancy.window)
+        n = predicted.n_samples
+        assert n == 1
+
+        rng = np.random.default_rng(20260807)
+        discrepancy_value = np.abs(rng.normal(scale=2.0e-5, size=n)) + 1.0e-8
+        with_discrepancy = build_interferometry_channel(
+            reference_state=_reference_state(),
+            seed=_SEED,
+            registry=default_registry(),
+            discrepancy=discrepancy_value,
+        )
+        residual = rng.normal(scale=1.0e-4, size=n)
+        observed = Measurement(
+            instrument_id=predicted.instrument_id,
+            values=np.asarray(predicted.values) + residual,
+            uncertainty=np.ones(n),
+            units=predicted.units,
+            window=predicted.window,
+        )
+
+        result = with_discrepancy.inversion.likelihood(observed, predicted)
+
+        registry = default_registry()
+        sigma_independent = if_noise.independent_phase_std_rad(registry=registry)
+        sigma_common = if_noise.vibration_phase_std_rad(
+            with_discrepancy.window.duration_s, registry=registry
+        )
+        d = np.full(n, sigma_independent**2)
+        v = np.full(n, sigma_common)
+        dense_covariance = (
+            np.diag(d) + np.outer(v, v) + np.outer(discrepancy_value, discrepancy_value)
+        )
+
+        expected = multivariate_normal.logpdf(
+            np.asarray(observed.values) - np.asarray(predicted.values),
+            mean=np.zeros(n),
+            cov=dense_covariance,
+        )
+
+        assert result == pytest.approx(expected, rel=1.0e-8)

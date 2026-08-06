@@ -22,6 +22,8 @@ from vpl.core.state import (
     AcquisitionWindow,
     CalibrationState,
     Fidelity,
+    Measurement,
+    Observable,
     PhaseGrid,
     PlasmaParams,
     PlasmaState,
@@ -30,7 +32,11 @@ from vpl.core.state import (
     Species,
 )
 from vpl.core.units import Q_
+from vpl.instruments.coherent import coherent_gaussian_log_prob, stack_coherent_rows
 from vpl.instruments.thomson import photons
+from vpl.instruments.thomson.instrument import (
+    _COHERENT_GAUSSIAN_MINIMUM_EXPECTED_COUNTS as _MINIMUM_COUNTS,
+)
 from vpl.instruments.thomson.instrument import (
     CHANNEL_WIDTH_NM,
     N_SPECTRAL_CHANNELS,
@@ -526,3 +532,148 @@ class TestTheCoherentCalibrationTerm:
         assert instrument.likelihood(
             observed, predicted, calibration_uncertainty=True
         ) == instrument.likelihood(observed, predicted)
+
+
+class TestCoherentModelDiscrepancy:
+    """doc 05 §4's coherent discrepancy term, on the one channel whose likelihood is
+    unconditionally Poisson (doc 05 §3.1).
+
+    ``ThomsonInstrument.likelihood``'s own docstring records the choice made for this
+    channel: a coherent additive standard deviation has no variance slot in a pure Poisson
+    pmf, so supplying one switches the *whole* channel to the correlated-Gaussian branch
+    every other channel's coherent term already uses — the same thing OES's likelihood
+    already does once *any* coherent term is supplied to it. That switch is only taken
+    when every channel's expected count clears
+    :data:`~vpl.instruments.thomson.instrument._COHERENT_GAUSSIAN_MINIMUM_EXPECTED_COUNTS`;
+    below it the method refuses rather than silently trusting a Gaussian approximation to a
+    Poisson pmf that is known to be a poor stand-in there. This class is what catches a
+    regression on either half of that: a discrepancy that is silently dropped, or a
+    discrepancy that is silently accepted below the floor.
+    """
+
+    @staticmethod
+    def _prediction(counts_per_channel: float) -> Observable:
+        return Observable(
+            instrument_id=THOMSON_INSTRUMENT_ID,
+            values=np.full(N_SPECTRAL_CHANNELS, counts_per_channel),
+            units=PHOTON_COUNT_UNITS,
+            window=_RP1_WINDOW,
+        )
+
+    @staticmethod
+    def _measurement(pred: Observable, *, offset: float = 0.0) -> Measurement:
+        values = np.asarray(pred.values, dtype=np.float64) + offset
+        return Measurement(
+            instrument_id=THOMSON_INSTRUMENT_ID,
+            values=values,
+            uncertainty=np.sqrt(np.maximum(values, 1.0)),
+            units=PHOTON_COUNT_UNITS,
+            window=pred.window,
+            calibration=CalibrationState.ESTIMATED,
+        )
+
+    def test_none_reproduces_the_poisson_likelihood_bit_for_bit(self) -> None:
+        # The load-bearing property: every existing caller of this method — and every
+        # published regression baseline scored through it — must be unaffected by an
+        # argument only opt-in callers asked for. Exact equality, not allclose.
+        instrument = ThomsonInstrument(root_seed=3)
+        pred = self._prediction(50.0)
+        obs = self._measurement(pred, offset=3.0)
+
+        assert instrument.likelihood(obs, pred) == instrument.likelihood(
+            obs, pred, coherent_discrepancy=None
+        )
+
+    def test_a_discrepancy_below_the_count_floor_is_refused(self) -> None:
+        # A channel expecting far fewer than _MINIMUM_COUNTS photoelectrons is exactly the
+        # regime doc 02 §7.1's 0.008 pe/channel/shot describes at RP-1 — the floor must
+        # bind here rather than silently approximating a Poisson of mean ~5 as a Gaussian.
+        instrument = ThomsonInstrument(root_seed=3)
+        pred = self._prediction(5.0)
+        assert _MINIMUM_COUNTS > 5.0
+        obs = self._measurement(pred)
+        discrepancy = 0.1 * np.asarray(pred.values, dtype=np.float64)
+
+        with pytest.raises(ValueError, match="floor"):
+            instrument.likelihood(obs, pred, coherent_discrepancy=discrepancy)
+
+    def test_a_discrepancy_at_every_channel_above_the_floor_is_accepted(self) -> None:
+        instrument = ThomsonInstrument(root_seed=3)
+        pred = self._prediction(500.0)
+        assert _MINIMUM_COUNTS < 500.0
+        obs = self._measurement(pred, offset=2.0)
+        discrepancy = 0.05 * np.asarray(pred.values, dtype=np.float64)
+
+        result = instrument.likelihood(obs, pred, coherent_discrepancy=discrepancy)
+        assert np.isfinite(result)
+
+    def test_a_discrepancy_widens_the_interval_never_tightens_it(self) -> None:
+        """doc 00 §5.1 S4's point, and the mean-variance-coupling bug this project has
+        already hit once: a discrepancy term must lower the curvature of the
+        log-likelihood around the truth, never raise it."""
+        instrument = ThomsonInstrument(root_seed=3)
+        pred = self._prediction(500.0)
+        obs = self._measurement(pred)
+        discrepancy = 0.05 * np.asarray(pred.values, dtype=np.float64)
+
+        def score(*, perturb: float, with_discrepancy: bool) -> float:
+            shifted = Observable(
+                instrument_id=pred.instrument_id,
+                values=np.asarray(pred.values, dtype=np.float64) * (1.0 + perturb),
+                units=pred.units,
+                window=pred.window,
+            )
+            return instrument.likelihood(
+                obs, shifted, coherent_discrepancy=discrepancy if with_discrepancy else None
+            )
+
+        step = 1.0e-3
+
+        def curvature(*, with_discrepancy: bool) -> float:
+            centre = score(perturb=0.0, with_discrepancy=with_discrepancy)
+            up = score(perturb=step, with_discrepancy=with_discrepancy)
+            down = score(perturb=-step, with_discrepancy=with_discrepancy)
+            return -(up - 2.0 * centre + down) / step**2
+
+        without = curvature(with_discrepancy=False)
+        with_term = curvature(with_discrepancy=True)
+
+        assert without > 0.0
+        assert with_term > 0.0
+        assert with_term < without
+
+    def test_matches_the_shared_coherent_kernel_computed_independently(self) -> None:
+        # Reconstructed from the public vpl.instruments.coherent building blocks, so the
+        # method's internal composition of counts/expected/variance cannot silently
+        # disagree with the shared Woodbury kernel it claims to be built from.
+        instrument = ThomsonInstrument(root_seed=3)
+        pred = self._prediction(500.0)
+        obs = self._measurement(pred, offset=4.0)
+        discrepancy = 0.05 * np.asarray(pred.values, dtype=np.float64)
+
+        result = instrument.likelihood(obs, pred, coherent_discrepancy=discrepancy)
+
+        counts = np.maximum(np.rint(np.asarray(obs.values, dtype=np.float64)), 0.0)
+        expected = np.asarray(pred.values, dtype=np.float64)
+        basis = stack_coherent_rows([discrepancy], expected_shape=expected.shape)
+        assert basis is not None
+        expected_value = coherent_gaussian_log_prob(
+            residual=(counts - expected).reshape(-1),
+            variance=np.maximum(expected.reshape(-1), 1.0),
+            basis=basis,
+        )
+
+        assert result == pytest.approx(expected_value, rel=1.0e-12)
+
+    def test_calibration_uncertainty_alone_is_unaffected_by_the_new_floor_check(
+        self,
+    ) -> None:
+        # The count-floor check only guards the discrepancy path; calibration_uncertainty
+        # on its own (no discrepancy) must still work below the floor, exactly as before.
+        instrument = ThomsonInstrument(root_seed=3)
+        pred = self._prediction(5.0)
+        assert _MINIMUM_COUNTS > 5.0
+        obs = self._measurement(pred)
+
+        result = instrument.likelihood(obs, pred, calibration_uncertainty=True)
+        assert np.isfinite(result)

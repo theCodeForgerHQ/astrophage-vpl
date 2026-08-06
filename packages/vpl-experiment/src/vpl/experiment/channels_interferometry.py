@@ -536,6 +536,7 @@ class _BulkInterferometer:
         obs: Measurement,
         pred: Observable,
         *,
+        coherent_discrepancy: FloatArray | None = None,
         calibration_uncertainty: bool = False,
     ) -> LogProb:
         """The correlated-Gaussian term of doc 05 §3.2 — see the module docstring's
@@ -549,6 +550,21 @@ class _BulkInterferometer:
         :func:`~vpl.instruments.coherent.coherent_gaussian_log_prob` — the same shared
         kernel :class:`~vpl.instruments.interferometry.instrument.InterferometryInstrument`
         uses, now with a single sample rather than eight.
+
+        Args:
+            obs: The measurement.
+            pred: The prediction to score it against.
+            coherent_discrepancy: Optional model-discrepancy **standard deviation**, in
+                radians (doc 05 §4, doc 11 WBS 3.6), stacked in as one more coherent row on
+                top of the mandatory vibration term — exactly the same rank-``k`` extension
+                :class:`~vpl.instruments.interferometry.instrument.InterferometryInstrument.
+                likelihood` documents at length for why it is not a special case here: the
+                vibration term already makes this channel's covariance non-diagonal, so a
+                discrepancy adds another coherent direction rather than introducing
+                correlation that was not already there. ``None`` reproduces the pre-existing
+                likelihood exactly.
+            calibration_uncertainty: Whether to score the doc 04 §7.3 phase-scale
+                calibration as the coherent systematic it is.
 
         Raises:
             RuntimeError: If ``calibration_uncertainty=True`` is requested for a
@@ -576,26 +592,31 @@ class _BulkInterferometer:
         d = np.full(n, sigma_independent**2, dtype=np.float64)
         v = np.full(n, sigma_common, dtype=np.float64)
 
-        if not (calibration_uncertainty and obs.calibration is not CalibrationState.TRUE):
-            basis = stack_coherent_rows([v], expected_shape=(n,))
-            if basis is None:
-                raise AssertionError("unreachable: the vibration row is never empty")
-            return coherent_gaussian_log_prob(residual=residual, variance=d, basis=basis)
-
-        if self._calibration is None:
-            raise RuntimeError(
-                f"{self.instrument_id}: calibration_uncertainty=True needs calibrate() to "
-                "have been called first — that is where the phase-scale standard's "
-                "registered relative_uncertainty comes from. use_true_calibration() alone "
-                "does not supply it."
+        # `rows` starts at `[v]` (the mandatory vibration term) whether or not either
+        # optional term is requested, so the no-extra-term call below is bit for bit
+        # unchanged from what this method computed before either argument existed.
+        rows: list[FloatArray] = [v]
+        apply_calibration = calibration_uncertainty and obs.calibration is not CalibrationState.TRUE
+        if apply_calibration:
+            if self._calibration is None:
+                raise RuntimeError(
+                    f"{self.instrument_id}: calibration_uncertainty=True needs calibrate() "
+                    "to have been called first — that is where the phase-scale standard's "
+                    "registered relative_uncertainty comes from. use_true_calibration() "
+                    "alone does not supply it."
+                )
+            rows.append(
+                fractional_calibration_row(
+                    np.asarray(pred.values, dtype=np.float64),
+                    relative_uncertainty=self._calibration.relative_uncertainty["phase_scale"],
+                )
             )
-        calibration_row = fractional_calibration_row(
-            np.asarray(pred.values, dtype=np.float64),
-            relative_uncertainty=self._calibration.relative_uncertainty["phase_scale"],
-        )
-        basis = stack_coherent_rows([v, calibration_row], expected_shape=(n,))
+        if coherent_discrepancy is not None:
+            rows.append(np.asarray(coherent_discrepancy, dtype=np.float64))
+
+        basis = stack_coherent_rows(rows, expected_shape=(n,))
         if basis is None:
-            raise AssertionError("unreachable: two non-empty coherent rows were just supplied")
+            raise AssertionError("unreachable: the vibration row is never empty")
         return coherent_gaussian_log_prob(residual=residual, variance=d, basis=basis)
 
     def is_informative(self, state_guess: PlasmaParams) -> bool:
@@ -675,22 +696,30 @@ class _BulkInterferometer:
 
 
 class _InterferometryWithOptionalCoherence:
-    """``_BulkInterferometer`` with ``calibration_uncertainty`` pinned for fusion.
+    """``_BulkInterferometer`` with ``calibration_uncertainty`` and a per-channel
+    ``coherent_discrepancy`` pinned for fusion.
 
     :class:`~vpl.inverse.fusion.JointLikelihood` calls ``instrument.likelihood(obs, pred)``
     through a fixed two-positional-argument protocol, so a caller that wants
-    :meth:`_BulkInterferometer.likelihood`'s ``calibration_uncertainty`` flag on every call
-    needs it pinned somewhere reachable through that fixed shape rather than threaded
-    through it at call time — the same problem
-    :mod:`vpl.experiment.channels`'s ``_LifOnReconstructedIvdf`` solves for a different
-    per-call transform.
+    :meth:`_BulkInterferometer.likelihood`'s ``calibration_uncertainty`` flag — or its doc
+    05 §4 ``coherent_discrepancy`` term — on every call needs both pinned somewhere
+    reachable through that fixed shape rather than threaded through it at call time — the
+    same problem :mod:`vpl.experiment.channels`'s ``_LifOnReconstructedIvdf`` solves for a
+    different per-call transform.
     """
 
-    __slots__ = ("_calibration_uncertainty", "_instrument")
+    __slots__ = ("_calibration_uncertainty", "_coherent_discrepancy", "_instrument")
 
-    def __init__(self, instrument: _BulkInterferometer, *, calibration_uncertainty: bool) -> None:
+    def __init__(
+        self,
+        instrument: _BulkInterferometer,
+        *,
+        calibration_uncertainty: bool,
+        coherent_discrepancy: FloatArray | None = None,
+    ) -> None:
         self._instrument = instrument
         self._calibration_uncertainty = calibration_uncertainty
+        self._coherent_discrepancy = coherent_discrepancy
 
     def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
         return self._instrument.forward(state, w)
@@ -701,7 +730,10 @@ class _InterferometryWithOptionalCoherence:
     def likelihood(self, obs: Measurement, pred: Observable) -> float:
         return float(
             self._instrument.likelihood(
-                obs, pred, calibration_uncertainty=self._calibration_uncertainty
+                obs,
+                pred,
+                coherent_discrepancy=self._coherent_discrepancy,
+                calibration_uncertainty=self._calibration_uncertainty,
             )
         )
 
@@ -763,6 +795,7 @@ def build_interferometry_channel(
     noise: bool = True,
     imperfect_calibration: bool = True,
     calibration_uncertainty: bool = False,
+    discrepancy: FloatArray | None = None,
     start_z_m: float | None = None,  # noqa: ARG001 - accepted for call-signature parity only
 ) -> InterferometryChannel:
     """Assemble one interferometry channel for a closed-loop configuration.
@@ -791,6 +824,12 @@ def build_interferometry_channel(
             phase-scale calibration as the coherent systematic doc 06 §4.1 says it is, rather
             than asserting the scale is known exactly. See the module docstring's "scoring
             the calibration coherently" section.
+        discrepancy: Optional doc 05 §4 model-discrepancy standard deviation, pinned onto
+            the inversion instrument's :class:`_InterferometryWithOptionalCoherence`
+            wrapper so it reaches :meth:`_BulkInterferometer.likelihood`'s
+            ``coherent_discrepancy`` through fusion's fixed ``likelihood(obs, pred)`` call
+            shape. ``None`` (the default) leaves the likelihood exactly as it was before
+            this parameter existed.
         start_z_m: **Accepted but unused.** The old 8-chord ladder anchor this parameter
             named no longer exists — see the module docstring's reframing: there is no chord
             ladder left to anchor, only a single fixed chamber-diameter chord length (doc 02
@@ -820,6 +859,8 @@ def build_interferometry_channel(
         chord_length_m=truth.chord_length_m,
         truth=truth,
         inversion=_InterferometryWithOptionalCoherence(
-            inversion, calibration_uncertainty=calibration_uncertainty
+            inversion,
+            calibration_uncertainty=calibration_uncertainty,
+            coherent_discrepancy=discrepancy,
         ),
     )

@@ -465,3 +465,138 @@ class TestThomsonIsExcludedRatherThanCrashingWhenTheSheathSwallowsItsVolume:
         # The instrument's own floor would have admitted the swallowed state, which is what
         # makes the campaign-level half of the gate necessary rather than redundant.
         assert channels.thomson.inversion.instrument.is_informative(swallowed)
+
+
+class TestDiscrepancyReachesEachChannel:
+    """``build_channels(discrepancy=...)`` — keyed by channel name, pinned onto each
+    wrapper's constructor state rather than threaded through a call.
+
+    ``vpl.inverse.fusion.Channel`` calls ``instrument.likelihood(obs, pred)`` with exactly
+    the two positional arguments its own ``_Instrument`` protocol declares, so a per-channel
+    discrepancy has nowhere to travel except as state each of ``_OesWithCalibrationUncertainty``,
+    ``_LifOnReconstructedIvdf``, ``_ThomsonOutsideTheSheath`` and interferometry's
+    ``_InterferometryWithOptionalCoherence`` carries — exactly the same problem
+    ``calibration_uncertainty`` already solves for each of them. This class is the
+    end-to-end check that ``build_channels``'s mapping actually reaches every one of the
+    four wrappers, that an unrecognised key is refused rather than silently doing nothing,
+    and that ``discrepancy=None`` disturbs nothing.
+    """
+
+    def test_an_unrecognised_channel_name_is_refused(self) -> None:
+        # A typo'd key would otherwise apply no discrepancy to any channel and look
+        # identical to the feature doing nothing — doc 00 §5.1 S4's failure mode in a new
+        # guise. Matched on the bad name itself, not just the exception type: a bare
+        # ValueError could come from anywhere in build_channels and would pass whether or
+        # not the guard fires on the right condition.
+        with pytest.raises(ValueError, match="oes_typo"):
+            build_channels(
+                reference_state=_reference_state(),
+                seed=_SEED,
+                discrepancy={"oes_typo": np.array([1.0])},
+            )
+
+    def test_discrepancy_none_is_bit_for_bit_identical_to_the_default(
+        self, channels: ChannelSet, truth_state: PlasmaState
+    ) -> None:
+        explicit_none = build_channels(
+            reference_state=_reference_state(), seed=_SEED, discrepancy=None
+        )
+        observations = channels.observe(truth_state)
+
+        default_log_prob = channels.joint(observations).log_prob(truth_state)
+        explicit_log_prob = explicit_none.joint(observations).log_prob(truth_state)
+
+        assert default_log_prob == explicit_log_prob
+
+    @pytest.mark.parametrize("name", [OES_CHANNEL, LIF_CHANNEL, INTERFEROMETRY_CHANNEL])
+    def test_a_discrepancy_on_one_channel_changes_only_that_channels_contribution(
+        self, name: str, channels: ChannelSet, truth_state: PlasmaState
+    ) -> None:
+        # Thomson is excluded from this parametrisation and tested separately below: its
+        # Poisson likelihood refuses a coherent discrepancy at RP-1's photon-starved
+        # channels rather than silently approximating past the count floor (see
+        # ThomsonInstrument.likelihood's own docstring), so a uniform test across all four
+        # channels would fail for a reason this class exists to document, not to hide.
+        observations = channels.observe(truth_state)
+        values = np.abs(np.asarray(observations[name].values))
+        discrepancy_value = 0.02 * values + 1.0e-12
+
+        with_discrepancy = build_channels(
+            reference_state=_reference_state(),
+            seed=_SEED,
+            discrepancy={name: discrepancy_value},
+        )
+
+        without_term = _only(channels.joint(observations), name).log_prob(truth_state)
+        with_term = _only(with_discrepancy.joint(observations), name).log_prob(truth_state)
+
+        assert math.isfinite(with_term)
+        assert with_term != without_term
+
+        # Every other channel's own contribution must be untouched: a discrepancy pinned
+        # on one wrapper reaching a sibling wrapper would be a much worse bug than one
+        # doing nothing.
+        for other in CHANNEL_NAMES:
+            if other == name:
+                continue
+            assert _only(channels.joint(observations), other).log_prob(truth_state) == _only(
+                with_discrepancy.joint(observations), other
+            ).log_prob(truth_state)
+
+    def test_oes_discrepancy_widens_the_curvature_through_the_wrapper(
+        self, channels: ChannelSet, truth_state: PlasmaState
+    ) -> None:
+        """The same widens-never-tightens property the instrument-level tests check,
+        reproduced through ``build_channels``'s wrapper to confirm the wiring does not
+        introduce the mean-variance-coupling defect this project has already hit once."""
+        observations = channels.observe(truth_state)
+        oes_values = np.abs(np.asarray(observations[OES_CHANNEL].values))
+        discrepancy_value = 0.05 * oes_values + 1.0e-12
+
+        with_discrepancy = build_channels(
+            reference_state=_reference_state(),
+            seed=_SEED,
+            discrepancy={OES_CHANNEL: discrepancy_value},
+        )
+
+        def curvature(built: ChannelSet) -> float:
+            step = 1.0e-3
+
+            def score(theta_n0_factor: float) -> float:
+                scaled_state = _state(_operating_theta().replace(n_0=theta_n0_factor))
+                return _only(built.joint(observations), OES_CHANNEL).log_prob(scaled_state)
+
+            centre_n0 = float(_operating_theta().n_0)
+            centre = score(centre_n0)
+            up = score(centre_n0 * (1.0 + step))
+            down = score(centre_n0 * (1.0 - step))
+            return -(up - 2.0 * centre + down) / (centre_n0 * step) ** 2
+
+        without = curvature(channels)
+        with_term = curvature(with_discrepancy)
+
+        assert without > 0.0
+        assert with_term > 0.0
+        assert with_term < without
+
+    def test_a_thomson_discrepancy_is_refused_at_rp1s_photon_starved_channels(
+        self, channels: ChannelSet, truth_state: PlasmaState
+    ) -> None:
+        """The documented, measured limitation: doc 02 §7.1's 0.008 pe/channel/shot means
+        several Thomson channels sit far below the Gaussian normal-approximation floor
+        ``ThomsonInstrument.likelihood`` requires before it will accept a coherent
+        discrepancy — see that method's own docstring. This is not a bug in the wiring;
+        it is the wiring correctly refusing to approximate past a floor doc 02 §7.1's own
+        numbers put out of reach here."""
+        observations = channels.observe(truth_state)
+        thomson_values = np.abs(np.asarray(observations[THOMSON_CHANNEL].values))
+        discrepancy_value = 0.02 * thomson_values + 1.0e-12
+
+        with_discrepancy = build_channels(
+            reference_state=_reference_state(),
+            seed=_SEED,
+            discrepancy={THOMSON_CHANNEL: discrepancy_value},
+        )
+
+        with pytest.raises(ValueError, match="floor"):
+            _only(with_discrepancy.joint(observations), THOMSON_CHANNEL).log_prob(truth_state)

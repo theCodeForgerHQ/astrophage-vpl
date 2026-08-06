@@ -484,28 +484,51 @@ class InterferometryInstrument:
         obs: Measurement,
         pred: Observable,
         *,
+        coherent_discrepancy: FloatArray | None = None,
         calibration_uncertainty: bool = False,
     ) -> LogProb:
         """The correlated-Gaussian term of doc 05 §3.2 — see the module docstring.
 
-        With ``calibration_uncertainty=False`` (the default), builds
-        ``Sigma = D + v v^T`` (``D`` independent per-chord variance, ``v`` the common-mode
-        vibration standard deviation broadcast across chords) and applies the rank-one
-        Sherman-Morrison identity:
+        With ``calibration_uncertainty=False`` and ``coherent_discrepancy=None`` (both
+        defaults), builds ``Sigma = D + v v^T`` (``D`` independent per-chord variance,
+        ``v`` the common-mode vibration standard deviation broadcast across chords) and
+        applies the rank-one Sherman-Morrison identity:
 
             r' Sigma^-1 r  =  r'D^-1 r - (v'D^-1 r)^2 / (1 + v'D^-1 v)
             log|Sigma|     =  log|D| + log(1 + v'D^-1 v)
 
         the ``k = 1`` case of the general Woodbury identity
         :class:`~vpl.instruments.oes.instrument.OesInstrument.likelihood` documents in
-        full for its own rank-``k`` discrepancy term. This path is untouched by the
-        ``calibration_uncertainty`` argument and reproduces exactly what this method
-        computed before that argument existed — the T0/T1-style regression baselines this
-        channel is folded into depend on that being bit for bit, not merely close.
+        full for its own rank-``k`` discrepancy term. This path is untouched by either
+        argument and reproduces exactly what this method computed before they existed —
+        the T0/T1-style regression baselines this channel is folded into depend on that
+        being bit for bit, not merely close.
 
         Args:
             obs: The measurement.
             pred: The prediction to score it against.
+            coherent_discrepancy: Optional per-chord **standard deviation** of model
+                discrepancy, in radians, treated as fully coherent across chords (doc 05
+                §4, doc 11 WBS 3.6) — either one direction shaped like the prediction or a
+                ``(k, n)`` basis. ``None`` reproduces the pre-existing likelihood exactly.
+
+                **Special care applies here, unlike OES and LIF.** This channel's
+                covariance already has an unavoidable off-diagonal term before any
+                discrepancy is added — the module docstring is explicit that "the
+                correlated structure here is not optional". A discrepancy therefore does
+                not turn a diagonal covariance into a rank-one one; it adds *another*
+                coherent direction on top of the vibration term already there:
+                ``Sigma = D + v v^T + U^T U``, both terms carried through the same
+                :func:`~vpl.instruments.coherent.stack_coherent_rows` /
+                :func:`~vpl.instruments.coherent.coherent_gaussian_log_prob` Woodbury path
+                so the vibration term and the discrepancy term cannot be scored by two
+                independently-derived pieces of algebra that could silently disagree about
+                the off-diagonal structure both of them contribute to. Below,
+                ``test_matches_a_dense_covariance_via_scipy`` checks the result against an
+                explicitly assembled dense ``Sigma`` and
+                ``scipy.stats.multivariate_normal.logpdf`` rather than trusting the
+                Woodbury algebra to have been extended correctly by inspection alone
+                (ADR-011: agreement with yourself is not evidence).
             calibration_uncertainty: Whether to score the doc 04 §7.3 AOM/path-length
                 phase-scale calibration as the coherent systematic it is — see
                 **Calibration** below.
@@ -577,8 +600,12 @@ class InterferometryInstrument:
         d = np.full(n, sigma_independent**2, dtype=np.float64)
         v = np.full(n, sigma_common, dtype=np.float64)
 
-        if not (calibration_uncertainty and obs.calibration is not CalibrationState.TRUE):
+        apply_calibration = calibration_uncertainty and obs.calibration is not CalibrationState.TRUE
+        if not apply_calibration and coherent_discrepancy is None:
             # The pre-existing bespoke Sherman-Morrison path — untouched, bit for bit.
+            # `coherent_discrepancy is None` is load-bearing here: this branch is what
+            # protects every existing caller (and the T0/T1 regression baselines) from a
+            # change only opt-in callers of the new argument asked for.
             d_inv_r = residual / d
             d_inv_v = v / d
             quad_diag = float(residual @ d_inv_r)
@@ -590,21 +617,35 @@ class InterferometryInstrument:
             log_det = float(np.sum(np.log(d))) + math.log(m)
             return float(-0.5 * quadratic - 0.5 * log_det - 0.5 * n * math.log(2.0 * math.pi))
 
-        if self._calibration is None:
-            raise RuntimeError(
-                f"{self.instrument_id}: calibration_uncertainty=True needs calibrate() to "
-                "have been called first — that is where the phase-scale standard's "
-                "registered relative_uncertainty comes from (see this method's "
-                "docstring for why there is no registry entry to read it from instead). "
-                "use_true_calibration() alone does not supply it."
+        # Either the calibration row, the discrepancy rows, or both are being added on top
+        # of the vibration row `v` — never fewer than one extra row, since this branch is
+        # only reached when `apply_calibration` or `coherent_discrepancy is not None`.
+        # Composed through the shared Woodbury kernel rather than a second hand-derived
+        # Sherman-Morrison-for-two-terms identity, which is exactly what this method's own
+        # docstring says must not be allowed to disagree with the k=1 path above about the
+        # vibration term both paths share.
+        rows: list[FloatArray] = [v]
+        if apply_calibration:
+            if self._calibration is None:
+                raise RuntimeError(
+                    f"{self.instrument_id}: calibration_uncertainty=True needs calibrate() "
+                    "to have been called first — that is where the phase-scale standard's "
+                    "registered relative_uncertainty comes from (see this method's "
+                    "docstring for why there is no registry entry to read it from instead). "
+                    "use_true_calibration() alone does not supply it."
+                )
+            rows.append(
+                fractional_calibration_row(
+                    np.asarray(pred.values, dtype=np.float64),
+                    relative_uncertainty=self._calibration.relative_uncertainty["phase_scale"],
+                )
             )
-        calibration_row = fractional_calibration_row(
-            np.asarray(pred.values, dtype=np.float64),
-            relative_uncertainty=self._calibration.relative_uncertainty["phase_scale"],
-        )
-        basis = stack_coherent_rows([v, calibration_row], expected_shape=(n,))
+        if coherent_discrepancy is not None:
+            rows.append(np.asarray(coherent_discrepancy, dtype=np.float64))
+
+        basis = stack_coherent_rows(rows, expected_shape=(n,))
         if basis is None:
-            raise AssertionError("unreachable: two non-empty coherent rows were just supplied")
+            raise AssertionError("unreachable: the vibration row is never empty")
         return coherent_gaussian_log_prob(residual=residual, variance=d, basis=basis)
 
     def is_informative(self, state_guess: PlasmaParams) -> bool:

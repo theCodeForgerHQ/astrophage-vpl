@@ -172,6 +172,18 @@ _DEFAULT_Z_INDEX: Final[int] = -1
 #: report there is infinitely (and wrongly) confident about an ordinary observation.
 _MINIMUM_VARIANCE_COUNTS: Final[float] = 1.0
 
+#: Smallest per-channel *expected* photoelectron count :meth:`ThomsonInstrument.likelihood`
+#: will accept a ``coherent_discrepancy`` term against.
+#:
+#: A Poisson(lambda) random variable has skewness ``1 / sqrt(lambda)``; at lambda = 20 that
+#: is ~0.22, the conventional rule-of-thumb point at which a symmetric Gaussian becomes a
+#: defensible stand-in for a Poisson pmf (e.g. Casella & Berger, *Statistical Inference*,
+#: 2nd ed., §5.3's discussion of the normal approximation to a sum of count variables — a
+#: Poisson is itself a limit of a Binomial sum). See ``likelihood``'s docstring, "Model
+#: discrepancy on a Poisson channel", for why this floor exists and why it is expected to
+#: bind at this project's own RP-1 reference point.
+_COHERENT_GAUSSIAN_MINIMUM_EXPECTED_COUNTS: Final[float] = 20.0
+
 
 class ThomsonBlindWindowError(ValueError):
     """A window's expected photon count is below the doc 02 §7.1 consequence 2 floor.
@@ -491,6 +503,7 @@ class ThomsonInstrument:
         obs: Measurement,
         pred: Observable,
         *,
+        coherent_discrepancy: FloatArray | None = None,
         calibration_uncertainty: bool = False,
     ) -> LogProb:
         """This channel's Poisson term in the doc 05 §3.2 sum — doc 05 §3.1: "Poisson for
@@ -508,8 +521,76 @@ class ThomsonInstrument:
         Args:
             obs: The measurement.
             pred: The prediction to score it against.
+            coherent_discrepancy: Optional per-channel **standard deviation** of model
+                discrepancy, in photoelectrons, treated as fully coherent across channels
+                (doc 05 §4, doc 11 WBS 3.6). ``None`` keeps the exact pre-existing
+                behaviour, which is what T0 and T1 need — their model is correct and their
+                intervals already cover, so any perturbation is a regression. See **Model
+                discrepancy on a Poisson channel** below for what supplying one actually
+                does to this particular likelihood, and when it is refused.
             calibration_uncertainty: Whether to score the doc 02 §7.3 Rayleigh calibration
                 as the coherent systematic it is — see **Calibration** below.
+
+        Model discrepancy on a Poisson channel — the choice made here, and why:
+            A coherent additive *standard deviation* has no natural home in a pure Poisson
+            likelihood. A Poisson distribution has exactly one free parameter, its mean,
+            and mean and variance are the same number by construction — there is no
+            separate variance slot doc 05 §4's discrepancy term can inflate the way it
+            inflates OES's or LIF's Gaussian covariance. Three ways to handle that were
+            weighed:
+
+            (a) Switch to the Gaussian normal approximation to the Poisson once a
+                discrepancy is supplied, and route it through the same rank-``k`` Woodbury
+                machinery every other channel's coherent term already uses — valid once
+                the counts involved are large enough for a Gaussian to be a defensible
+                stand-in for a Poisson pmf, and refused otherwise.
+            (b) Add the discrepancy as extra variance in an overdispersed count model
+                (a negative-binomial-style excess-variance term) that stays a genuine
+                count distribution throughout.
+            (c) Refuse to support a coherent discrepancy on this channel at all.
+
+            **(a) is what is implemented, gated by an explicit count floor, and (b) and
+            (c) were both rejected.** (b) would give this one channel a second
+            count-noise family that exists solely for the discrepancy term, so which
+            distribution describes the same data would depend on which optional argument
+            happened to be supplied — the kind of quietly inconsistent modelling doc 00 §6
+            calls parameter fog, and it does not reuse any machinery this project has
+            already validated. (c) was rejected because it is not the only defensible
+            answer available: (a) reuses, rather than invents, the precedent
+            :meth:`~vpl.instruments.oes.instrument.OesInstrument.likelihood` already sets
+            — that method also abandons its Poisson pmf entirely and switches every pixel
+            to the shared correlated Gaussian the moment *any* coherent term is supplied,
+            for the reason its own docstring gives: "once systematic error dominates the
+            counting statistics, mixing a Poisson pmf with a correlated Gaussian is not a
+            well-defined joint density anyway". Applying that same, already-adopted
+            reasoning here — rather than re-litigating it per channel — is (a).
+
+            **The count floor is not decorative.** A Poisson(lambda) distribution's
+            skewness is ``1 / sqrt(lambda)``;
+            :data:`_COHERENT_GAUSSIAN_MINIMUM_EXPECTED_COUNTS` (20 pe) is the point at
+            which that skewness (~0.22) is small enough for the Gaussian stand-in to be
+            defensible — see that constant's own docstring for the citation. Every
+            channel's *expected* count (``pred.values``, not the noisier observed one) is
+            checked against it before the Gaussian branch is taken, and a channel below
+            the floor raises rather than silently returning a number computed under an
+            approximation known to be poor there.
+
+            **This floor is expected to bind at this project's own reference point, and
+            that is reported here rather than tuned around.** This method's opening
+            paragraph already cites doc 02 §7.1's 0.008 pe/channel/shot as the reason the
+            OES-style bright/faint switch "essentially never applies here" even *without*
+            a discrepancy term. A ~700 s RP-1 accumulation raises the *total* signal
+            considerably above one shot's worth — doc 02 §7.1's own worked example puts
+            the channel-summed total near ``1 / 0.03**2 ~ 1.1e3`` counts for a 3 %
+            measurement — but that total is spread unevenly across
+            :data:`N_SPECTRAL_CHANNELS` channels by :meth:`_spectral_weights`'s line
+            shape, so individual channels away from line centre fall below the 20 pe floor
+            well before the channel-summed total does. A coherent discrepancy correction
+            is therefore genuinely not defensible for every RP-1 Thomson acquisition this
+            project runs, and this method says so by raising rather than by quietly
+            approximating past it — a stated limitation of applying a Kennedy & O'Hagan
+            (2001)-style discrepancy correction to this particular channel, not a defect
+            in the check.
 
         Calibration — doc 06 §5, doc 06 §4.1:
             :meth:`calibrate` draws a ``count_scale`` from the Rayleigh standard, and this
@@ -545,6 +626,13 @@ class ThomsonInstrument:
             silently re-score every existing caller's posterior, and doc 04 §7.3 permits the
             true response "for verification", which leaves no calibration error to score. The
             guard is on the measurement's own record rather than on the caller remembering.
+
+        Raises:
+            ValueError: If ``obs`` and ``pred`` have different shapes, or if
+                ``coherent_discrepancy`` is supplied while any channel's *expected*
+                photoelectron count is below
+                :data:`_COHERENT_GAUSSIAN_MINIMUM_EXPECTED_COUNTS` — see "Model
+                discrepancy on a Poisson channel" above.
         """
         if obs.shape != pred.shape:
             raise ValueError(
@@ -562,6 +650,22 @@ class ThomsonInstrument:
                     relative_uncertainty=photons.RAYLEIGH_CALIBRATION_RELATIVE_UNCERTAINTY,
                 )
             )
+        if coherent_discrepancy is not None:
+            if np.any(expected < _COHERENT_GAUSSIAN_MINIMUM_EXPECTED_COUNTS):
+                floor_hit = float(np.min(expected))
+                raise ValueError(
+                    f"{self.instrument_id}: a coherent model discrepancy was supplied but "
+                    f"the expected photoelectron count falls as low as {floor_hit:.3g} in "
+                    "at least one channel, below the "
+                    f"{_COHERENT_GAUSSIAN_MINIMUM_EXPECTED_COUNTS:.3g}-pe floor this "
+                    "channel's Gaussian normal-approximation branch needs to be a "
+                    "defensible stand-in for the Poisson pmf a discrepancy term has no "
+                    "variance slot in — see this method's docstring, 'Model discrepancy "
+                    "on a Poisson channel'. Doc 02 §7.1's 0.008 pe/channel/shot means this "
+                    "is expected at RP-1; a coherent discrepancy correction is not "
+                    "defensible for this channel at that operating point."
+                )
+            rows.append(np.asarray(coherent_discrepancy, dtype=np.float64))
         # `None` here means nothing coherent was supplied, and the pre-existing Poisson
         # likelihood is returned unchanged and bit for bit — which is what protects every
         # existing caller of this method from a change only opt-in callers asked for.

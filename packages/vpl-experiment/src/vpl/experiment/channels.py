@@ -438,7 +438,7 @@ class _LifOnReconstructedIvdf:
     everything else unchanged.
     """
 
-    __slots__ = ("_calibration_uncertainty", "_instrument", "_registry")
+    __slots__ = ("_calibration_uncertainty", "_coherent_discrepancy", "_instrument", "_registry")
 
     def __init__(
         self,
@@ -446,10 +446,12 @@ class _LifOnReconstructedIvdf:
         *,
         registry: ParameterRegistry,
         calibration_uncertainty: bool = False,
+        coherent_discrepancy: FloatArray | None = None,
     ) -> None:
         self._instrument = instrument
         self._registry = registry
         self._calibration_uncertainty = calibration_uncertainty
+        self._coherent_discrepancy = coherent_discrepancy
 
     def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
         return self._instrument.forward(reconstruct_ivdf(state, registry=self._registry), w)
@@ -460,7 +462,10 @@ class _LifOnReconstructedIvdf:
     def likelihood(self, obs: Measurement, pred: Observable) -> float:
         return float(
             self._instrument.likelihood(
-                obs, pred, calibration_uncertainty=self._calibration_uncertainty
+                obs,
+                pred,
+                coherent_discrepancy=self._coherent_discrepancy,
+                calibration_uncertainty=self._calibration_uncertainty,
             )
         )
 
@@ -514,7 +519,13 @@ class _ThomsonOutsideTheSheath:
     run.
     """
 
-    __slots__ = ("_calibration_uncertainty", "_instrument", "_solver", "_z_pin_m")
+    __slots__ = (
+        "_calibration_uncertainty",
+        "_coherent_discrepancy",
+        "_instrument",
+        "_solver",
+        "_z_pin_m",
+    )
 
     def __init__(
         self,
@@ -523,11 +534,13 @@ class _ThomsonOutsideTheSheath:
         z_pin_m: float,
         solver: AnalyticSheathSolver,
         calibration_uncertainty: bool = False,
+        coherent_discrepancy: FloatArray | None = None,
     ) -> None:
         self._instrument = instrument
         self._z_pin_m = z_pin_m
         self._solver = solver
         self._calibration_uncertainty = calibration_uncertainty
+        self._coherent_discrepancy = coherent_discrepancy
 
     def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
         return self._instrument.forward(state, w)
@@ -538,7 +551,10 @@ class _ThomsonOutsideTheSheath:
     def likelihood(self, obs: Measurement, pred: Observable) -> float:
         return float(
             self._instrument.likelihood(
-                obs, pred, calibration_uncertainty=self._calibration_uncertainty
+                obs,
+                pred,
+                coherent_discrepancy=self._coherent_discrepancy,
+                calibration_uncertainty=self._calibration_uncertainty,
             )
         )
 
@@ -575,11 +591,18 @@ class _OesWithCalibrationUncertainty:
     *campaign*, not of this method", and this class is where a campaign says so.
     """
 
-    __slots__ = ("_calibration_uncertainty", "_instrument")
+    __slots__ = ("_calibration_uncertainty", "_coherent_discrepancy", "_instrument")
 
-    def __init__(self, instrument: OesInstrument, *, calibration_uncertainty: bool) -> None:
+    def __init__(
+        self,
+        instrument: OesInstrument,
+        *,
+        calibration_uncertainty: bool,
+        coherent_discrepancy: FloatArray | None = None,
+    ) -> None:
         self._instrument = instrument
         self._calibration_uncertainty = calibration_uncertainty
+        self._coherent_discrepancy = coherent_discrepancy
 
     def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
         return self._instrument.forward(state, w)
@@ -590,7 +613,10 @@ class _OesWithCalibrationUncertainty:
     def likelihood(self, obs: Measurement, pred: Observable) -> float:
         return float(
             self._instrument.likelihood(
-                obs, pred, calibration_uncertainty=self._calibration_uncertainty
+                obs,
+                pred,
+                coherent_discrepancy=self._coherent_discrepancy,
+                calibration_uncertainty=self._calibration_uncertainty,
             )
         )
 
@@ -673,6 +699,7 @@ def _lif_instrument(
     registry: ParameterRegistry,
     imperfect_calibration: bool,
     calibration_uncertainty: bool = False,
+    coherent_discrepancy: FloatArray | None = None,
 ) -> _LifOnReconstructedIvdf:
     """One configured LIF channel — doc 08 §6's manifest block, filled in from code.
 
@@ -695,7 +722,10 @@ def _lif_instrument(
         )
     )
     return _LifOnReconstructedIvdf(
-        instrument, registry=registry, calibration_uncertainty=calibration_uncertainty
+        instrument,
+        registry=registry,
+        calibration_uncertainty=calibration_uncertainty,
+        coherent_discrepancy=coherent_discrepancy,
     )
 
 
@@ -851,6 +881,7 @@ def build_channels(
     thomson_z_index: int | None = None,
     interferometry_start_z_m: float | None = None,
     calibration_uncertainty: bool = False,
+    discrepancy: Mapping[str, FloatArray] | None = None,
     truth_eedf_factory: Callable[[EnergyGrid], EedfProvider] | None = None,
 ) -> ChannelSet:
     """Assemble all four channels for one closed-loop configuration.
@@ -909,6 +940,22 @@ def build_channels(
             :meth:`~vpl.instruments.oes.instrument.OesInstrument.likelihood`'s own docstring
             gives: T0 and T1 are published regression baselines and a flipped default
             silently re-scores every existing caller.
+        discrepancy: Optional doc 05 §4 model-discrepancy standard deviation, keyed by
+            channel name (:data:`OES_CHANNEL`, :data:`LIF_CHANNEL`, :data:`THOMSON_CHANNEL`,
+            :data:`INTERFEROMETRY_CHANNEL`). Each entry is pinned onto that channel's
+            inversion-side wrapper as constructor state — never threaded through a call —
+            because :class:`~vpl.inverse.fusion.Channel` calls
+            ``instrument.likelihood(obs, pred)`` with exactly the two positional arguments
+            doc 08 §3 fixes the fusion layer's protocol to, the same reason
+            ``calibration_uncertainty`` is bound here rather than passed at call time. A
+            channel absent from the mapping (or the mapping itself left ``None``) keeps its
+            pre-existing, undiscrepant likelihood exactly.
+
+            A key that does not name one of the four channels above is refused rather than
+            silently ignored: a typo'd key would otherwise apply no discrepancy to any
+            channel and look identical to the feature doing nothing, which is exactly the
+            failure mode doc 00 §5.1 criterion S4 is written against — a plausible-looking
+            correction that quietly is not there.
         truth_eedf_factory: The EEDF the **truth's** OES measurement is generated with.
             ``None`` means the same Maxwellian the inversion assumes, so there is no EEDF
             mismatch. T2 supplies ``closed_loop._t2_truth_eedf_factory``; without this
@@ -950,6 +997,15 @@ def build_channels(
         _maxwellian_eedf_factory if truth_eedf_factory is None else truth_eedf_factory
     )
 
+    resolved_discrepancy: Mapping[str, FloatArray] = {} if discrepancy is None else discrepancy
+    unknown_channels = sorted(set(resolved_discrepancy) - set(CHANNEL_NAMES))
+    if unknown_channels:
+        raise ValueError(
+            f"discrepancy names {', '.join(unknown_channels)} do not match any channel "
+            f"({', '.join(CHANNEL_NAMES)}); a typo'd key would otherwise apply no "
+            "discrepancy to any channel and look like the feature doing nothing."
+        )
+
     truth_oes = _oes_instrument(
         seed=seed, registry=resolved, eedf_factory=resolved_truth_eedf_factory
     )
@@ -961,6 +1017,7 @@ def build_channels(
     inversion_oes = _OesWithCalibrationUncertainty(
         _oes_instrument(seed=seed, registry=resolved, eedf_factory=_maxwellian_eedf_factory),
         calibration_uncertainty=calibration_uncertainty,
+        coherent_discrepancy=resolved_discrepancy.get(OES_CHANNEL),
     )
 
     truth_lif = _lif_instrument(
@@ -978,6 +1035,7 @@ def build_channels(
         registry=resolved,
         imperfect_calibration=False,
         calibration_uncertainty=calibration_uncertainty,
+        coherent_discrepancy=resolved_discrepancy.get(LIF_CHANNEL),
     )
 
     thomson = build_thomson_channel(
@@ -999,6 +1057,7 @@ def build_channels(
             z_pin_m=float(reference_state.grid.z_m[thomson.z_index]),
             solver=AnalyticSheathSolver(),
             calibration_uncertainty=calibration_uncertainty,
+            coherent_discrepancy=resolved_discrepancy.get(THOMSON_CHANNEL),
         ),
     )
     interferometry = build_interferometry_channel(
@@ -1008,6 +1067,7 @@ def build_channels(
         noise=noise,
         imperfect_calibration=imperfect_calibration,
         calibration_uncertainty=calibration_uncertainty,
+        discrepancy=resolved_discrepancy.get(INTERFEROMETRY_CHANNEL),
         start_z_m=interferometry_start_z_m,
     )
 

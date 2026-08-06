@@ -621,3 +621,149 @@ class TestCalibrationUncertaintyLikelihood:
         expected = coherent_gaussian_log_prob(residual=residual, variance=d, basis=basis)
 
         assert with_term == pytest.approx(expected, rel=1.0e-12)
+
+
+class TestCoherentModelDiscrepancy:
+    """doc 05 §4's rank-``k`` discrepancy term, added on top of a likelihood that is
+    *already* a correlated Gaussian before any discrepancy is supplied — the module
+    docstring is explicit that "the correlated structure here is not optional", unlike
+    OES's and LIF's diagonal-by-default channels. So the algebra under test here is not
+    "diagonal becomes rank-one" but "rank-one (vibration) becomes rank-(k+1) (vibration
+    plus discrepancy)", and getting that composition wrong is exactly the trap ADR-011
+    calls "agreement with yourself is not evidence" — the dense-covariance tests below are
+    the only members of this class that do not simply trust the method's own algebra.
+    """
+
+    def test_none_reproduces_the_pre_existing_likelihood_bit_for_bit(self) -> None:
+        instrument = _configured()
+        instrument.calibrate(_references())
+        observed = instrument.observe(_state(), _WINDOW)
+        predicted = observed.as_observable()
+
+        explicit_default = instrument.likelihood(observed, predicted, coherent_discrepancy=None)
+        omitted_default = instrument.likelihood(observed, predicted)
+
+        assert explicit_default == omitted_default
+
+    def test_a_discrepancy_widens_the_interval_never_tightens_it(self) -> None:
+        """doc 00 §5.1 S4's point, and the mean-variance-coupling bug this project has
+        already hit once: a discrepancy term must lower the curvature of the
+        log-likelihood around the truth, never raise it."""
+        instrument = _configured()
+        predicted = instrument.forward(_state(), _WINDOW)
+        discrepancy = 0.1 * np.abs(predicted.values) + 1.0e-6
+
+        def score(*, perturb: float, with_discrepancy: bool) -> float:
+            shifted_values = predicted.values * (1.0 + perturb)
+            obs = Measurement(
+                instrument_id=predicted.instrument_id,
+                values=shifted_values,
+                uncertainty=np.ones(predicted.n_samples),
+                units=predicted.units,
+                window=predicted.window,
+            )
+            return instrument.likelihood(
+                obs, predicted, coherent_discrepancy=discrepancy if with_discrepancy else None
+            )
+
+        step = 1.0e-4
+
+        def curvature(*, with_discrepancy: bool) -> float:
+            centre = score(perturb=0.0, with_discrepancy=with_discrepancy)
+            up = score(perturb=step, with_discrepancy=with_discrepancy)
+            down = score(perturb=-step, with_discrepancy=with_discrepancy)
+            return -(up - 2.0 * centre + down) / step**2
+
+        without = curvature(with_discrepancy=False)
+        with_term = curvature(with_discrepancy=True)
+
+        assert without > 0.0
+        assert with_term > 0.0
+        assert with_term < without
+
+    def test_matches_a_dense_covariance_via_scipy(self) -> None:
+        """The direct algebra check the module docstring's "Special care applies here"
+        note promises: ``Sigma = diag(d) + v v^T + basis^T @ basis``, built explicitly and
+        densely, scored with ``scipy.stats.multivariate_normal.logpdf`` and compared
+        against what the method itself returns through its Woodbury path."""
+        from scipy.stats import multivariate_normal
+
+        instrument = _configured()
+        predicted = instrument.forward(_state(), _WINDOW)
+        n = predicted.n_samples
+        rng = np.random.default_rng(20260807)
+        residual = rng.normal(scale=1.0e-4, size=n)
+        observed = Measurement(
+            instrument_id=predicted.instrument_id,
+            values=predicted.values + residual,
+            uncertainty=np.ones(n),
+            units=predicted.units,
+            window=predicted.window,
+        )
+        # A rank-3 discrepancy basis, non-trivial and not proportional to the (rank-one)
+        # vibration direction, so this cannot pass merely by reproducing the k=1 case.
+        discrepancy = rng.normal(scale=2.0e-5, size=(3, n))
+
+        result = instrument.likelihood(observed, predicted, coherent_discrepancy=discrepancy)
+
+        sigma_independent = interferometry_noise.independent_phase_std_rad()
+        sigma_common = interferometry_noise.vibration_phase_std_rad(_WINDOW.duration_s)
+        d = np.full(n, sigma_independent**2)
+        v = np.full(n, sigma_common)
+        dense_covariance = np.diag(d) + np.outer(v, v) + discrepancy.T @ discrepancy
+
+        expected = multivariate_normal.logpdf(
+            observed.values - predicted.values, mean=np.zeros(n), cov=dense_covariance
+        )
+
+        assert result == pytest.approx(expected, rel=1.0e-8)
+
+    def test_matches_a_dense_covariance_with_calibration_and_discrepancy_combined(
+        self,
+    ) -> None:
+        """The ``k = 3`` case — vibration, calibration and discrepancy all present at
+        once — checked the same way, so the combination is verified and not merely each
+        term in isolation."""
+        from scipy.stats import multivariate_normal
+
+        from vpl.instruments.coherent import fractional_calibration_row
+
+        instrument = _configured()
+        instrument.calibrate(_references())
+        predicted = instrument.forward(_state(), _WINDOW)
+        n = predicted.n_samples
+        rng = np.random.default_rng(20260808)
+        residual = rng.normal(scale=1.0e-4, size=n)
+        observed = Measurement(
+            instrument_id=predicted.instrument_id,
+            values=predicted.values + residual,
+            uncertainty=np.ones(n),
+            units=predicted.units,
+            window=predicted.window,
+            calibration=CalibrationState.ESTIMATED,
+        )
+        discrepancy = rng.normal(scale=2.0e-5, size=n)
+
+        result = instrument.likelihood(
+            observed, predicted, coherent_discrepancy=discrepancy, calibration_uncertainty=True
+        )
+
+        sigma_independent = interferometry_noise.independent_phase_std_rad()
+        sigma_common = interferometry_noise.vibration_phase_std_rad(_WINDOW.duration_s)
+        d = np.full(n, sigma_independent**2)
+        v = np.full(n, sigma_common)
+        # _references()'s standard is registered at 2 % relative uncertainty (see that
+        # helper above).
+        calibration_row = fractional_calibration_row(predicted.values, relative_uncertainty=0.02)
+        dense_covariance = (
+            np.diag(d)
+            + np.outer(v, v)
+            + np.outer(discrepancy, discrepancy)
+            + calibration_row.T @ calibration_row
+        )
+
+        expected = multivariate_normal.logpdf(
+            observed.values - predicted.values, mean=np.zeros(n), cov=dense_covariance
+        )
+
+        assert result == pytest.approx(expected, rel=1.0e-8)
