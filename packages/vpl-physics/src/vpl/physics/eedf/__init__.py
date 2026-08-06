@@ -35,10 +35,12 @@ thing that needed arguing, and it is argued in the ADR rather than assumed here.
 
 from vpl.physics.eedf.analytic import (
     DRUYVESTEYN_KAPPA,
+    KAPPA_DISTRIBUTION_MINIMUM_KAPPA,
     MAXWELLIAN_KAPPA,
     AnalyticEedf,
     druyvesteyn_eedf,
     generalised_eedf,
+    kappa_eedf,
     maxwellian_eedf,
 )
 from vpl.physics.eedf.grid import EnergyGrid
@@ -79,6 +81,7 @@ __all__ = [
     "DRUYVESTEYN_KAPPA",
     "GAMMA",
     "GRID_TRUNCATION_TOLERANCE",
+    "KAPPA_DISTRIBUTION_MINIMUM_KAPPA",
     "MAXWELLIAN_KAPPA",
     "ROOM_TEMPERATURE_EV",
     "TOWNSEND_V_M2",
@@ -96,6 +99,7 @@ __all__ = [
     "TwoTermSolver",
     "druyvesteyn_eedf",
     "generalised_eedf",
+    "kappa_eedf",
     "kinetics_from_set",
     "maxwellian_eedf",
     "tabulate",

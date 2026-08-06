@@ -74,7 +74,7 @@ artifact.
 from __future__ import annotations
 
 import math
-from typing import Final, Protocol
+from typing import Final, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -99,12 +99,17 @@ from vpl.instruments.oes.cr import CollisionalRadiativeModel
 from vpl.instruments.oes.emissivity import chord_radiance, emission_spectrum
 from vpl.instruments.oes.lineshape import doppler_fwhm_nm
 from vpl.instruments.oes.spectrograph import Spectrograph
-from vpl.physics.eedf.analytic import maxwellian_eedf
+from vpl.physics.eedf.analytic import (
+    KAPPA_DISTRIBUTION_MINIMUM_KAPPA,
+    kappa_eedf,
+    maxwellian_eedf,
+)
 from vpl.physics.eedf.grid import EnergyGrid
 
 __all__ = [
     "RADIANCE_UNITS",
     "EedfProvider",
+    "KappaEedf",
     "MaxwellianEedf",
     "OesInstrument",
 ]
@@ -124,13 +129,16 @@ _DEFAULT_INSTRUMENT_ID: Final[InstrumentId] = "oes"
 _MINIMUM_VARIANCE_COUNTS: Final[float] = 1.0
 
 
+@runtime_checkable
 class EedfProvider(Protocol):
     """Supplies the EEDF the CR rate coefficients are integrated over — doc 04 §2.2.
 
     Structural rather than nominal, so that a tabulated
     :class:`~vpl.physics.eedf.tabulate.RateTable` sweep, a live
     :class:`~vpl.physics.eedf.solver.TwoTermSolver` or a stored L2 distribution can each be
-    plugged in without this module knowing which.
+    plugged in without this module knowing which. ``@runtime_checkable`` so that
+    conformance — :class:`MaxwellianEedf`'s, :class:`KappaEedf`'s, or a third provider's —
+    can be asserted with :func:`isinstance` rather than only by mypy.
     """
 
     def f0(self, *, electron_temperature_ev: float) -> FloatArray:
@@ -172,6 +180,61 @@ class MaxwellianEedf:
 
     def __repr__(self) -> str:
         return f"MaxwellianEedf({self.grid!r})"
+
+
+class KappaEedf:
+    """A kappa distribution at the local ``T_e`` — doc 05 §7.1's second EEDF shape.
+
+    Doc 05 §7.1 lists "EEDF parameterisation" among the mandatory model mismatches a T2
+    result must exercise, and until this class existed :class:`MaxwellianEedf` was the
+    only :class:`EedfProvider` available — so that mismatch axis had nothing to switch to.
+    This is :func:`~vpl.physics.eedf.analytic.kappa_eedf`, the Summers & Thorne (1991) /
+    Pierrard & Lazar (2010) power-law family, wrapped the same way
+    :class:`MaxwellianEedf` wraps :func:`~vpl.physics.eedf.analytic.maxwellian_eedf`.
+
+    Unlike ``T_e``, which arrives per :meth:`f0` call from the plasma state, ``kappa`` is
+    supplied once at construction: it is a control parameter drawn from
+    ``PlasmaParams.kappa`` (doc 05 §2.1's uniform ``[1, 5]`` prior), not a constant of this
+    class. **That prior's lower half, ``[1, 1.5]``, is below this family's validity
+    bound** — see :mod:`vpl.physics.eedf.analytic`'s module docstring for what that
+    inconsistency is and why it is not resolved here. A ``kappa`` at or below the bound is
+    refused at construction rather than at the first :meth:`f0` call, for the same
+    fail-fast reason :attr:`OesInstrument.centre_wavelength_nm` validates eagerly: the
+    error should land on the manifest line that set ``kappa``, not several calls later.
+    """
+
+    __slots__ = ("_cache", "grid", "kappa")
+
+    def __init__(self, *, grid: EnergyGrid, kappa: float) -> None:
+        if not kappa > KAPPA_DISTRIBUTION_MINIMUM_KAPPA:
+            raise ValueError(
+                f"kappa must exceed {KAPPA_DISTRIBUTION_MINIMUM_KAPPA} for the kappa "
+                f"distribution's mean energy to exist (Summers & Thorne 1991; Pierrard & "
+                f"Lazar 2010), got {kappa}. Note doc 05 §2.1's uniform [1, 5] prior on "
+                f"PlasmaParams.kappa extends below this bound — see "
+                f"vpl.physics.eedf.analytic's module docstring."
+            )
+        self.grid = grid
+        self.kappa = kappa
+        self._cache: dict[float, FloatArray] = {}
+
+    def f0(self, *, electron_temperature_ev: float) -> FloatArray:
+        if not electron_temperature_ev > 0.0:
+            raise ValueError(f"T_e must be positive, got {electron_temperature_ev} eV")
+        cached = self._cache.get(electron_temperature_ev)
+        if cached is None:
+            cached = self.grid.normalise(
+                kappa_eedf(
+                    self.grid.centres_ev,
+                    electron_temperature_ev=electron_temperature_ev,
+                    kappa=self.kappa,
+                )
+            )
+            self._cache[electron_temperature_ev] = cached
+        return cached
+
+    def __repr__(self) -> str:
+        return f"KappaEedf({self.grid!r}, kappa={self.kappa})"
 
 
 class OesInstrument:
