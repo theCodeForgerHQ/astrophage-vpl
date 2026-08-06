@@ -735,6 +735,11 @@ def run_grid(
                 l2_truth_path=l2_truth_path,
                 registry=registry,
                 credible_level=credible_level,
+                # Forwarded rather than left at its default: `run_cell`'s own flag drives
+                # the within-cell progress line, and an L1 inversion spends minutes pushing
+                # posterior draws with nothing printed. A silent sweep is indistinguishable
+                # from a hung one.
+                verbose=verbose,
             )
         # Recorded, not swallowed — see this function's docstring for why a sweep must not
         # stop at, nor silently drop, a cell it cannot run.
