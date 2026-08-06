@@ -95,6 +95,7 @@ from vpl.experiment.closed_loop import (
     _theta_from_unconstrained,
     _to_plasma_params,
 )
+from vpl.experiment.discrepancy_basis import load_channel_discrepancy
 from vpl.experiment.l2_truth import (
     L2_POSTERIOR_SAMPLES,
     L2Truth,
@@ -199,6 +200,15 @@ class Cell:
     imperfect_calibration: bool
     calibration_uncertainty: bool
     truth_eedf: EedfShape
+    #: Whether the inversion-side likelihoods carry a doc 05 §4 model-discrepancy term.
+    #:
+    #: Orthogonal to the tier, like ``calibration_uncertainty``: it changes how wide the
+    #: interval is, not what the run may be called. Defaults ``False`` so every cell that
+    #: existed before this field keeps its exact meaning and its measured numbers.
+    #:
+    #: Requires a saved basis (:mod:`vpl.experiment.discrepancy_basis`), because estimating
+    #: one needs L1 and L1 needs dolfinx.
+    model_discrepancy: bool = False
 
     @property
     def same_model(self) -> bool:
@@ -226,11 +236,12 @@ def cell_label(cell: Cell) -> str:
     rows that can be joined on it.
     """
     calibration = "cal-on" if cell.calibration_uncertainty else "cal-off"
+    discrepancy = "disc-on" if cell.model_discrepancy else "disc-off"
     noise = "noise" if cell.noise else "clean"
     response = "est-resp" if cell.imperfect_calibration else "true-resp"
     return (
         f"{cell.truth.value}->{cell.inversion.value}/"
-        f"{noise}/{response}/{calibration}/{cell.truth_eedf.value}"
+        f"{noise}/{response}/{calibration}/{discrepancy}/{cell.truth_eedf.value}"
     )
 
 
@@ -280,6 +291,11 @@ class CellReport:
     #: interval. Carried rather than discarded because it is what an identifiability or
     #: sensitivity question needs afterwards, and re-deriving it means re-running the cell.
     posterior: LaplacePosterior | None
+    #: Channels that actually carried a discrepancy term. Empty when the cell did not ask
+    #: for one. Carried because "discrepancy applied" is a claim about *which* channels, and
+    #: Thomson is excluded at RP-1 (see `_DISCREPANCY_INELIGIBLE_CHANNELS`) — a row that
+    #: reported only a boolean would hide that a quarter of the correction is missing.
+    discrepancy_channels: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
@@ -451,6 +467,58 @@ def _truth_state(
     return truth.state, truth.gamma_e_w_per_m2, true_theta
 
 
+#: Channels that cannot carry a discrepancy term at this operating point.
+#:
+#: Thomson only. :meth:`~vpl.instruments.thomson.instrument.ThomsonInstrument.likelihood`
+#: switches to a Gaussian when a coherent discrepancy is supplied and refuses below 20
+#: expected photoelectrons per channel, because a Poisson has no separate variance slot to
+#: inflate and the normal approximation is poor in the tail. Measured on the RP-1 reference:
+#: per-channel expected counts run 4.7e-8 to 303, with **13 of 20 channels below the
+#: floor**. The 1111-count total is healthy; the line shape concentrates it and starves the
+#: wings.
+#:
+#: So a four-channel discrepancy run corrects three channels. That is a real gap — Thomson's
+#: model error goes unmodelled and the interval is correspondingly optimistic — and it is
+#: named here and reported on every row rather than discovered later from a raised exception.
+_DISCREPANCY_INELIGIBLE_CHANNELS: Final[frozenset[str]] = frozenset({"thomson"})
+
+
+def _resolve_discrepancy(
+    cell: Cell, path: Path | str | None
+) -> tuple[dict[str, FloatArray] | None, tuple[str, ...]]:
+    """``(mapping for build_channels, the channel names actually corrected)``.
+
+    Returns ``(None, ())`` when the cell does not ask for a discrepancy, so a cell built
+    before this axis existed takes a bit-for-bit unchanged path.
+
+    Raises:
+        TruthArtefactRequiredError: If a discrepancy is asked for without a saved basis.
+            Estimating one needs L1, so this cannot be silently computed on demand
+            wherever the inversion happens to be running.
+    """
+    if not cell.model_discrepancy:
+        return None, ()
+    if path is None:
+        raise TruthArtefactRequiredError(
+            "cell.model_discrepancy is set but no discrepancy_path was given. The basis is "
+            "an L0-vs-L1 sweep and L1 needs dolfinx, so it cannot be estimated on demand "
+            "here — produce one with vpl.experiment.discrepancy_basis."
+            "estimate_channel_discrepancy / save_channel_discrepancy and pass its path."
+        )
+    basis = load_channel_discrepancy(path)
+    eligible = {
+        name: matrix
+        for name, matrix in basis.items()
+        if name not in _DISCREPANCY_INELIGIBLE_CHANNELS
+    }
+    if not eligible:
+        raise TruthArtefactRequiredError(
+            f"every channel in {path} is ineligible for a discrepancy term at this "
+            f"operating point; the correction would be a no-op reported as applied."
+        )
+    return eligible, tuple(sorted(eligible))
+
+
 def _truth_eedf_factory(shape: EedfShape) -> object:
     return _maxwellian_eedf_factory if shape is EedfShape.MAXWELLIAN else _t2_truth_eedf_factory
 
@@ -463,6 +531,7 @@ def run_cell(
     *,
     seed: int = 0,
     l2_truth_path: Path | str | None = None,
+    discrepancy_path: Path | str | None = None,
     registry: ParameterRegistry | None = None,
     credible_level: float = CREDIBLE_LEVEL,
     verbose: bool = False,
@@ -475,6 +544,8 @@ def run_cell(
         seed: The single recorded seed (doc 00 E3) the truth draw and every instrument
             realisation derive from.
         l2_truth_path: Required when ``cell.truth`` is ``L2``; ignored otherwise.
+        discrepancy_path: Required when ``cell.model_discrepancy`` is set; ignored
+            otherwise. See :func:`_resolve_discrepancy`.
         credible_level: Central mass of the reported interval.
 
     Raises:
@@ -487,6 +558,11 @@ def run_cell(
     # runs that skip noise or skip the estimated response, and discovering that after an
     # L1 truth solve would be an avoidable minute — or, on the L2 path, an avoidable load.
     tier = cell.tier
+    # Resolved here, beside the tier check and for the same reason: a missing or unusable
+    # discrepancy basis is a configuration error, and discovering it *after* an L1 truth
+    # solve or an L2 artefact load would be an avoidable wait for an answer that was never
+    # going to come.
+    discrepancy, corrected_channels = _resolve_discrepancy(cell, discrepancy_path)
 
     resolved = registry if registry is not None else default_registry()
     species = _argon_ion(resolved)
@@ -521,6 +597,7 @@ def run_cell(
         imperfect_calibration=cell.imperfect_calibration,
         calibration_uncertainty=cell.calibration_uncertainty,
         truth_eedf_factory=_truth_eedf_factory(cell.truth_eedf),  # type: ignore[arg-type]
+        discrepancy=discrepancy,
     )
     joint: JointLikelihood = channel_set.joint(channel_set.observe(truth_state))
 
@@ -601,6 +678,7 @@ def run_cell(
         inversion_solves=forward.solves,
         wall_clock_s=time.perf_counter() - started,
         posterior=posterior,
+        discrepancy_channels=corrected_channels,
     )
 
 
@@ -712,6 +790,7 @@ def run_grid(
     *,
     seed: int = 0,
     l2_truth_path: Path | str | None = None,
+    discrepancy_path: Path | str | None = None,
     registry: ParameterRegistry | None = None,
     credible_level: float = CREDIBLE_LEVEL,
     verbose: bool = True,
@@ -733,6 +812,7 @@ def run_grid(
                 cell,
                 seed=seed,
                 l2_truth_path=l2_truth_path,
+                discrepancy_path=discrepancy_path,
                 registry=registry,
                 credible_level=credible_level,
                 # Forwarded rather than left at its default: `run_cell`'s own flag drives
