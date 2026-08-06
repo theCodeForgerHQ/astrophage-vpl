@@ -32,7 +32,6 @@ first-class operation rather than a code edit.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from vpl.inverse.fusion import (
