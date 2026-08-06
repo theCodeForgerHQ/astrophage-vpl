@@ -1,0 +1,83 @@
+# Published argon spectroscopic data — doc 04 §8 V-24, "CR model vs published Ar line
+# ratios". See vpl.validation.line_ratios for the loader and test_line_ratios.py for how
+# far the actual CR-model comparison could be carried before the data gap named there was
+# hit.
+#
+# Two independent, real sources are transcribed here — real in the sense the swarm
+# benchmarks are explicitly *not* (see vpl.validation.swarm's docstring): these numbers
+# describe actual argon, not a model gas chosen to avoid atomic-data uncertainty.
+#
+# ## Note on exponents and precision
+#
+# NIST ASD reports vacuum level energies to 8 significant figures; they are kept at that
+# precision here because the wavelength cross-check in test_line_ratios.py subtracts two
+# of them, and subtracting two 4-figure numbers 1.5 eV apart would throw away most of the
+# precision the check needs. As in doc 09's swarm-benchmarks.yaml, every exponent is
+# written signed (ADR-008: PyYAML's 1.1 float resolver requires it).
+
+citations:
+  nist-asd-levels: >-
+    NIST Atomic Spectra Database (ASD), Kramida A, Ralchenko Yu, Reader J and NIST ASD
+    Team, National Institute of Standards and Technology, Gaithersburg, MD. Ar I energy
+    levels, retrieved 2026-08-06 via
+    https://physics.nist.gov/cgi-bin/ASD/energy1.pl?spectrum=Ar+I (the ASD "Levels"
+    query). Public domain, doc 09 §2.2. Vacuum level energies in eV; statistical weight
+    g = 2J + 1, read directly from ASD's reported J. NOT independently re-derived by any
+    other means — see the module docstring in vpl.validation.line_ratios for what this
+    session could and could not verify (in particular: the ASD "Lines" query, which
+    would supply Einstein A coefficients, returned "Invalid Input" for every parameter
+    combination tried, so no A_ul is transcribed anywhere in this file).
+  zheng-2020: >-
+    H Zheng, J Wu, Q Cao, J Zhang and X Huang, "Diagnosis of electron density and
+    temperature by using collisional radiative model in capacitively coupled Ar plasmas
+    I: triple-frequency discharges", arXiv:2010.10714 [physics.plasm-ph] (2020),
+    https://arxiv.org/abs/2010.10714. An 18-level Ar collisional-radiative model
+    (ground + 4 "1s" levels + 10 "2p" levels + 3 effective higher levels), solved jointly
+    with OES intensities of the Ar I 750.4 nm (2p1 -> 1s2) and 696.5 nm (2p2 -> 1s5)
+    lines to obtain T_e and n_e, and compared against an independent Langmuir probe in
+    single- and triple-frequency capacitively coupled Ar plasmas at 1.5 Pa. The rows
+    below transcribe the calibration-point comparison of §4.1 verbatim (read from the
+    paper's own text, not a citation-index snippet).
+
+# Real NIST ASD vacuum level energies for the Ar I "1s" (3p^5.4s, Paschen) and "2p"
+# (3p^5.4p, Paschen) manifolds — the eight levels needed to identify the three classic
+# diagnostic lines (750.39, 763.51 and 811.53 nm). Not every level in either manifold is
+# here; only the ones the three named lines terminate on or start from.
+levels:
+  - {label: ground, term: "3p6", j: 0.0, energy_ev: 0.0e+00, degeneracy: 1,
+     role: ground, citation: nist-asd-levels}
+  - {label: "1s5", term: "3p5(2P3/2)4s 2[3/2]", j: 2.0, energy_ev: 1.154835442e+01,
+     degeneracy: 5, role: metastable, citation: nist-asd-levels}
+  - {label: "1s4", term: "3p5(2P3/2)4s 2[3/2]", j: 1.0, energy_ev: 1.162359272e+01,
+     degeneracy: 3, role: resonant, citation: nist-asd-levels}
+  - {label: "1s3", term: "3p5(2P1/2)4s 2[1/2]", j: 0.0, energy_ev: 1.172316039e+01,
+     degeneracy: 1, role: metastable, citation: nist-asd-levels}
+  - {label: "1s2", term: "3p5(2P1/2)4s 2[1/2]", j: 1.0, energy_ev: 1.182807116e+01,
+     degeneracy: 3, role: resonant, citation: nist-asd-levels}
+  - {label: "2p9", term: "3p5(2P3/2)4p 2[5/2]", j: 3.0, energy_ev: 1.307571571e+01,
+     degeneracy: 7, role: "upper of the 811.53 nm metastable-coupled line (2p9 -> 1s5)",
+     citation: nist-asd-levels}
+  - {label: "2p6", term: "3p5(2P3/2)4p 2[3/2]", j: 2.0, energy_ev: 1.317177770e+01,
+     degeneracy: 5, role: "upper of the 763.51 nm metastable-coupled line (2p6 -> 1s5)",
+     citation: nist-asd-levels}
+  - {label: "2p1", term: "3p5(2P1/2)4p 2[1/2]", j: 0.0, energy_ev: 1.347988682e+01,
+     degeneracy: 1, role: "upper of the 750.39 nm direct-excitation line (2p1 -> 1s2)",
+     citation: nist-asd-levels}
+
+# Zheng et al (2020) §4.1: the accuracy of their 18-level Ar CRM + OES method against an
+# independent Langmuir probe, in single-frequency Ar CCPs at 1.5 Pa, one row per RF
+# frequency used as the method's calibration point. This is the "published scatter" doc
+# 04 §8's V-24 pass criterion refers to for a real argon line-ratio CR technique — not a
+# line ratio itself, but the closest genuinely-transcribable published accuracy figure
+# this session could obtain (see the module docstring for what a literal ratio-vs-T_e
+# table would have needed and why none is here).
+accuracy_benchmarks:
+  - {source: zheng-2020, citation: zheng-2020, calibration: "2 MHz, 50 W",
+     gas_pressure_pa: 1.5, max_n_e_error: 2.39e-01, avg_n_e_error: 1.07e-01,
+     max_t_e_error: 7.2e-02, avg_t_e_error: 2.6e-02, figure: "Fig. 2(a)-(b)"}
+  - {source: zheng-2020, citation: zheng-2020, calibration: "13.56 MHz, 50 W",
+     gas_pressure_pa: 1.5, max_n_e_error: 1.19e-01, avg_n_e_error: 6.6e-02,
+     max_t_e_error: 6.1e-02, avg_t_e_error: 2.5e-02, figure: "Fig. 2(c)-(d)"}
+  - {source: zheng-2020, citation: zheng-2020, calibration: "27.12 MHz, 50 W",
+     gas_pressure_pa: 1.5, max_n_e_error: 1.41e-01, avg_n_e_error: 7.8e-02,
+     max_t_e_error: 5.0e-02, avg_t_e_error: 2.4e-02, figure: "Fig. 2(e)-(f)"}
