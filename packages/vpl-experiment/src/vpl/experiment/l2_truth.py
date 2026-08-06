@@ -295,11 +295,23 @@ L2_TO_L1_TIER: Final[Tier] = tier_of_configuration(
 #: Posterior draws pushed through L1's ``Gamma_E`` functional for the credible interval.
 #:
 #: ``closed_loop`` uses 20 000, which it can afford because L0's ``ion_energy_flux`` is
-#: closed form. Here every draw is a Newton solve, so 20 000 would be a twenty-minute
-#: interval on top of the inversion. 2 000 puts the Monte-Carlo standard error on a 5 %
-#: quantile at about 3 % of the interval's own half-width — an order of magnitude below the
-#: model discrepancy the interval is being asked to describe, and stated rather than left
-#: for a reader to work out.
+#: closed form. Here every draw is a Newton solve. 2 000 puts the Monte-Carlo standard error
+#: on a 5 % quantile at about 3 % of the interval's own half-width — an order of magnitude
+#: below the model discrepancy the interval is being asked to describe, and stated rather
+#: than left for a reader to work out.
+#:
+#: **The cost claim that used to be here was wrong by a factor of 19, and the correction is
+#: kept rather than quietly replaced.** It read "20 000 would be a twenty-minute interval",
+#: implying ~65 ms per Newton solve. Measured on the FEniCSx machine at the RP-1 reference,
+#: over five ``T_e`` factors spanning the sweep, every one converging: **1.24 s per solve**
+#: (0.83-1.41 s). So 2 000 draws is ~41 minutes of interval on top of the inversion, not
+#: two, and a full grid row costs about three quarters of an hour.
+#:
+#: The value is left at 2 000 because the binding error on this interval is not Monte-Carlo:
+#: the four-channel T2 grid puts the truth 34 interval half-widths outside, so the interval
+#: is wrong by a factor of tens for reasons no number of draws addresses. Cutting draws to
+#: buy wall clock would trade a negligible error against a dominant one. It is recorded here
+#: so the next person sizing a sweep starts from the measurement rather than from the guess.
 L2_POSTERIOR_SAMPLES: Final[int] = 2000
 
 #: Field name carrying the ion density, used only to check that a loaded artefact is a
