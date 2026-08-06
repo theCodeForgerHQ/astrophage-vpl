@@ -104,6 +104,7 @@ from typing import Final
 import numpy as np
 from numpy.typing import NDArray
 
+from vpl.core.params import ParameterRegistry, default_registry
 from vpl.core.protocols import (
     Calibration,
     CalibrationSet,
@@ -207,6 +208,7 @@ class InterferometryInstrument:
         "_chord_length_m",
         "_fringe_jump_rate",
         "_noise_enabled",
+        "_registry",
         "_rng",
         "_start_z_m",
         "_wavelength_m",
@@ -214,9 +216,14 @@ class InterferometryInstrument:
     )
 
     def __init__(
-        self, *, root_seed: int, instrument_id: InstrumentId = INTERFEROMETRY_INSTRUMENT_ID
+        self,
+        *,
+        root_seed: int,
+        instrument_id: InstrumentId = INTERFEROMETRY_INSTRUMENT_ID,
+        registry: ParameterRegistry | None = None,
     ) -> None:
         self.instrument_id = instrument_id
+        self._registry = registry if registry is not None else default_registry()
         self._chord_length_m: float | None = None
         self._wavelength_m: float | None = None
         self._start_z_m: float | None = None
@@ -391,8 +398,8 @@ class InterferometryInstrument:
         predicted = self._predict(state, w)
         n_chords = predicted.size
 
-        sigma_common = noise.vibration_phase_std_rad(w.duration_s)
-        sigma_independent = noise.independent_phase_std_rad()
+        sigma_common = noise.vibration_phase_std_rad(w.duration_s, registry=self._registry)
+        sigma_independent = noise.independent_phase_std_rad(registry=self._registry)
         uncertainty = np.full(
             n_chords, math.sqrt(sigma_common**2 + sigma_independent**2), dtype=np.float64
         )
@@ -482,8 +489,8 @@ class InterferometryInstrument:
         )
         n = residual.size
 
-        sigma_independent = noise.independent_phase_std_rad()
-        sigma_common = noise.vibration_phase_std_rad(obs.window.duration_s)
+        sigma_independent = noise.independent_phase_std_rad(registry=self._registry)
+        sigma_common = noise.vibration_phase_std_rad(obs.window.duration_s, registry=self._registry)
         d = np.full(n, sigma_independent**2, dtype=np.float64)
         v = np.full(n, sigma_common, dtype=np.float64)
 

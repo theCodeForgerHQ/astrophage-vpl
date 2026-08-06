@@ -31,6 +31,16 @@ claims a vibration amplitude the docs do not supply. See
 absolute magnitude — not the direction of its dependence on window length, and not the
 existence of the correlated/independent split — as the approximate part of this module.
 
+**That honesty was right about the amplitude and incomplete about the shape.** Every
+number that fixes *where* the shape sits — the resonance frequency and its width, how far
+the model integrates in frequency, how the shape's own variance splits between the 1/f and
+resonant components, and what window the IF-P1 calibration is anchored at — is exactly as
+unsourced as a free amplitude would have been, and none of it was registered when this
+module was first written (doc 00 C1 calls that a defect). All six are now
+``IF.vibration_*`` entries in the parameter registry, class ``ASSUMED``, each with a
+retirement path in its description; :func:`_load_vibration_params` reads them at call
+time rather than the module holding them as bare literals.
+
 ## Citations
 
 - I. H. Hutchinson, *Principles of Plasma Diagnostics*, 2nd ed., Cambridge University
@@ -45,11 +55,13 @@ existence of the correlated/independent split — as the approximate part of thi
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Final
 
 import numpy as np
 from numpy.typing import NDArray
 
+from vpl.core.params import ParameterRegistry, default_registry
 from vpl.instruments.interferometry.phase import PHASE_RESOLUTION_RAD
 
 __all__ = [
@@ -63,36 +75,38 @@ __all__ = [
 type FloatArray = NDArray[np.float64]
 
 # ── vibration spectrum shape and calibration ────────────────────────────────────
+#
+# Every parameter of the vibration shape is an invented number with no citable source
+# (module docstring) — registered ASSUMED in instruments-interferometry.yaml rather than
+# held as a bare module literal (doc 00 C1). :func:`_load_vibration_params` is the single
+# place this module reads them.
 
-#: The acquisition window at which the calibration below is anchored. Doc 02 §8.2 IF-P1
-#: states "0.1 mrad" without naming an integration time; 1 ms is a representative
-#: continuous-acquisition slice for this >=1 MHz-bandwidth (IF-4) channel.
-_REFERENCE_WINDOW_S: Final[float] = 1.0e-3
 
-#: Fraction of the total noise *variance* doc 02 IF-G2 assigns to the correlated
-#: vibration term rather than independent per-chord detector/digitiser noise, at the
-#: reference window. 0.9 makes vibration the dominant contributor, matching IF-G2's "the
-#: dominant systematic", while leaving a non-zero independent floor per chord.
-_COMMON_MODE_VARIANCE_FRACTION: Final[float] = 0.9
+@dataclass(frozen=True, slots=True)
+class _VibrationParams:
+    """The six ``IF.vibration_*`` ASSUMED-class registry entries, resolved once per call."""
 
-#: Structural resonance frequency the 1/f-plus-resonance shape is anchored around, a
-#: round number representative of a pneumatically floated optical table's first
-#: structural mode (tens of Hz is the typical range quoted by optical-table vibration
-#: isolation vendors for the equipment class doc 02 IF-G2 specifies). No measured
-#: spectrum is given by the design docs — see the module docstring.
-_RESONANCE_FREQUENCY_HZ: Final[float] = 50.0
+    reference_window_s: float
+    common_mode_variance_fraction: float
+    resonance_frequency_hz: float
+    resonance_width_hz: float
+    upper_bandwidth_hz: float
+    one_over_f_share: float
 
-#: Half-width at half maximum of the resonance peak above.
-_RESONANCE_WIDTH_HZ: Final[float] = 5.0
 
-#: Upper frequency this model integrates to. Above this, IF-G2's floated table is taken
-#: to isolate the interferometer effectively.
-_UPPER_BANDWIDTH_HZ: Final[float] = 1.0e4
-
-#: Split of the vibration shape's own variance between the 1/f term and the resonance
-#: term, at the reference window — an even split, since nothing in the docs favours one
-#: over the other.
-_ONE_OVER_F_SHARE: Final[float] = 0.5
+def _load_vibration_params(registry: ParameterRegistry | None) -> _VibrationParams:
+    """Resolve the vibration-model registry entries, defaulting to the shipped registry."""
+    entries = registry if registry is not None else default_registry()
+    return _VibrationParams(
+        reference_window_s=float(entries.value_in("IF.vibration_reference_window_s", "s")),
+        common_mode_variance_fraction=float(
+            entries.value_in("IF.vibration_common_mode_fraction", "dimensionless")
+        ),
+        resonance_frequency_hz=float(entries.value_in("IF.vibration_resonance_frequency_hz", "Hz")),
+        resonance_width_hz=float(entries.value_in("IF.vibration_resonance_width_hz", "Hz")),
+        upper_bandwidth_hz=float(entries.value_in("IF.vibration_upper_bandwidth_hz", "Hz")),
+        one_over_f_share=float(entries.value_in("IF.vibration_one_over_f_share", "dimensionless")),
+    )
 
 
 def _one_over_f_shape(f_min_hz: float, f_max_hz: float) -> float:
@@ -102,19 +116,21 @@ def _one_over_f_shape(f_min_hz: float, f_max_hz: float) -> float:
     return math.log(f_max_hz / f_min_hz)
 
 
-def _resonance_shape(f_min_hz: float, f_max_hz: float) -> float:
+def _resonance_shape(
+    f_min_hz: float, f_max_hz: float, *, resonance_frequency_hz: float, resonance_width_hz: float
+) -> float:
     """Un-normalised Lorentzian-resonance integral, closed form via arctan.
 
     ``INTEGRAL width^2 / ((f - f0)^2 + width^2) df = width * atan((f - f0)/width) + C``.
     """
     if f_min_hz >= f_max_hz:
         return 0.0
-    width = _RESONANCE_WIDTH_HZ
-    centre = _RESONANCE_FREQUENCY_HZ
+    width = resonance_width_hz
+    centre = resonance_frequency_hz
     return width * (math.atan((f_max_hz - centre) / width) - math.atan((f_min_hz - centre) / width))
 
 
-def _vibration_shape(duration_s: float) -> tuple[float, float]:
+def _vibration_shape(duration_s: float, *, params: _VibrationParams) -> tuple[float, float]:
     """``(1/f shape, resonance shape)`` integrated over this window's resolvable band.
 
     The lowest frequency a finite window of length ``duration_s`` can resolve is one
@@ -124,53 +140,76 @@ def _vibration_shape(duration_s: float) -> tuple[float, float]:
     systematic" is a statement about long, not short, integrations.
     """
     f_min = 1.0 / duration_s
-    f_max = _UPPER_BANDWIDTH_HZ
-    return _one_over_f_shape(f_min, f_max), _resonance_shape(f_min, f_max)
+    f_max = params.upper_bandwidth_hz
+    return (
+        _one_over_f_shape(f_min, f_max),
+        _resonance_shape(
+            f_min,
+            f_max,
+            resonance_frequency_hz=params.resonance_frequency_hz,
+            resonance_width_hz=params.resonance_width_hz,
+        ),
+    )
 
 
-def vibration_phase_std_rad(duration_s: float) -> float:
+def vibration_phase_std_rad(
+    duration_s: float, *, registry: ParameterRegistry | None = None
+) -> float:
     """Common-mode (correlated-across-chords) mechanical phase-noise standard deviation.
 
     See the module docstring for the calibration: the *shape* (1/f divergence plus a
     resonance bump) is physically motivated; the *absolute scale* is fixed so that, at
-    :data:`_REFERENCE_WINDOW_S`, the vibration term accounts for
-    :data:`_COMMON_MODE_VARIANCE_FRACTION` of doc 02 §8.2 IF-P1's quoted total phase-noise
+    ``IF.vibration_reference_window_s``, the vibration term accounts for
+    ``IF.vibration_common_mode_fraction`` of doc 02 §8.2 IF-P1's quoted total phase-noise
     variance (``PHASE_RESOLUTION_RAD^2``) — there being no measured spectrum in the design
     docs to normalise against independently.
 
     Returns 0.0 for a window too short to resolve the model's lowest frequency
-    (``1/duration_s >= _UPPER_BANDWIDTH_HZ``): a gate that fast cannot see mechanical
-    vibration at all, and it would be a modelling error to extrapolate noise power into a
-    band the acquisition never looked at.
+    (``1/duration_s >= IF.vibration_upper_bandwidth_hz``): a gate that fast cannot see
+    mechanical vibration at all, and it would be a modelling error to extrapolate noise
+    power into a band the acquisition never looked at.
+
+    Args:
+        duration_s: The acquisition window's length.
+        registry: Where the ``IF.vibration_*`` entries are read from. ``None`` (the
+            default) uses the shipped registry.
     """
     if not duration_s > 0.0:
         raise ValueError(f"duration must be positive, got {duration_s}")
 
-    reference_1f, reference_resonance = _vibration_shape(_REFERENCE_WINDOW_S)
+    params = _load_vibration_params(registry)
+
+    reference_1f, reference_resonance = _vibration_shape(params.reference_window_s, params=params)
     reference_shape = (
-        _ONE_OVER_F_SHARE * reference_1f + (1.0 - _ONE_OVER_F_SHARE) * reference_resonance
+        params.one_over_f_share * reference_1f
+        + (1.0 - params.one_over_f_share) * reference_resonance
     )
-    one_f, resonance = _vibration_shape(duration_s)
-    shape = _ONE_OVER_F_SHARE * one_f + (1.0 - _ONE_OVER_F_SHARE) * resonance
+    one_f, resonance = _vibration_shape(duration_s, params=params)
+    shape = params.one_over_f_share * one_f + (1.0 - params.one_over_f_share) * resonance
 
     if shape <= 0.0 or reference_shape <= 0.0:
         return 0.0
 
-    common_variance_at_reference = _COMMON_MODE_VARIANCE_FRACTION * PHASE_RESOLUTION_RAD**2
+    common_variance_at_reference = params.common_mode_variance_fraction * PHASE_RESOLUTION_RAD**2
     scaled_variance = common_variance_at_reference * shape / reference_shape
     return math.sqrt(max(scaled_variance, 0.0))
 
 
-def independent_phase_std_rad() -> float:
+def independent_phase_std_rad(*, registry: ParameterRegistry | None = None) -> float:
     """Per-chord, uncorrelated detector/digitiser noise — the diagonal ``D`` term.
 
     Constant with acquisition duration: unlike the coloured vibration term, this
     represents the HgCdTe detector and digitiser electronic-noise floor (doc 02 §8.2
     IF-D1), not a mechanical spectrum, so it is not modelled as frequency-dependent.
-    Combined with :func:`vibration_phase_std_rad` at :data:`_REFERENCE_WINDOW_S`, the two
-    variances sum to ``PHASE_RESOLUTION_RAD^2`` exactly, by construction.
+    Combined with :func:`vibration_phase_std_rad` at ``IF.vibration_reference_window_s``,
+    the two variances sum to ``PHASE_RESOLUTION_RAD^2`` exactly, by construction.
+
+    Args:
+        registry: Where ``IF.vibration_common_mode_fraction`` is read from. ``None`` (the
+            default) uses the shipped registry.
     """
-    return math.sqrt(1.0 - _COMMON_MODE_VARIANCE_FRACTION) * PHASE_RESOLUTION_RAD
+    params = _load_vibration_params(registry)
+    return math.sqrt(1.0 - params.common_mode_variance_fraction) * PHASE_RESOLUTION_RAD
 
 
 # ── fringe jumps ─────────────────────────────────────────────────────────────────

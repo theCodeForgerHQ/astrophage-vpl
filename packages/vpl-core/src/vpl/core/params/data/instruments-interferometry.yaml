@@ -1,0 +1,109 @@
+# Interferometry channel — ASSUMED-class entries only (doc 04 §5.2's vibration model).
+#
+# Every other interferometry number (CO2 wavelength, chamber diameter/chord length, the
+# IF-P1 phase resolution, chord count and spacing, the Dalgarno & Kingston argon
+# polarisability, ...) is a named, doc- or paper-cited `Final` constant in
+# `vpl.instruments.interferometry.phase` — doc 08 §5's escape hatch. This file exists for
+# the vibration-model shape parameters in `vpl.instruments.interferometry.noise`, none of
+# which doc 04 §5.2 supplies: it asks only for "mechanical path-length noise as a 1/f +
+# resonant-peak spectrum" — a qualitative shape, no numbers — and the module docstring is
+# explicit that "inventing an absolute PSD amplitude from nothing would be exactly the
+# 'parameter fog' doc 00 §6 warns against". That honesty was right about the *amplitude*
+# (which is calibrated against the sourced IF-P1 figure, doc 02 §8.2, and stays a
+# `Final` constant reference rather than a free number) but incomplete: the shape itself —
+# where the resonance sits, how wide it is, how much bandwidth it spans, how the variance
+# splits between the 1/f and resonant components, and what window the calibration is
+# anchored at — is exactly as unsourced as an amplitude would have been, and none of it
+# was registered. All six entries below are read at call time by
+# `vpl.instruments.interferometry.noise` rather than held as local literals.
+
+- id: IF.vibration_common_mode_fraction
+  description: >-
+    Fraction of the total IF-P1 phase-noise variance (0.1 mrad, doc 02 §8.2) attributed to
+    the correlated common-mode vibration term rather than independent per-chord detector
+    noise. Doc 02 IF-G2 calls mechanical drift "the dominant systematic" but gives no
+    number for how dominant; 0.9 was picked only to make vibration the larger of the two
+    terms while leaving a non-zero independent floor, which is a qualitative match to
+    "dominant", not a quantitative one. Retirement path: a per-chord phase-noise power
+    spectral density measurement with the interferometer running and the plasma off,
+    which would separate correlated from independent variance directly instead of by
+    assertion.
+  value: 0.9
+  units: dimensionless
+  class: ASSUMED
+  affects: [interferometry.likelihood, interferometry.vibration_noise]
+  category: instrument
+
+- id: IF.vibration_resonance_frequency_hz
+  description: >-
+    Structural resonance frequency the doc 04 §5.2 "1/f + resonant-peak" vibration shape
+    is centred on. No document gives a measured spectrum for the actual optical table;
+    50 Hz is a round number inside the range optical-table vibration-isolation vendors
+    typically quote for a pneumatically floated table's first structural mode, not a
+    number tied to this facility's hardware. Retirement path: a measured accelerometer or
+    heterodyne phase power spectral density of the real optical table, which would replace
+    this generic figure with the table's actual resonance.
+  value: 50.0
+  units: Hz
+  class: ASSUMED
+  affects: [interferometry.vibration_noise]
+  category: instrument
+
+- id: IF.vibration_resonance_width_hz
+  description: >-
+    Half-width at half maximum of the resonance peak in the vibration PSD model. No
+    document specifies a peak width at all; it was set to one tenth of
+    IF.vibration_resonance_frequency_hz with no independent justification. Retirement
+    path: the same measured vibration power spectral density that would retire
+    IF.vibration_resonance_frequency_hz fixes this simultaneously, since both come from
+    fitting the same measured peak.
+  value: 5.0
+  units: Hz
+  class: ASSUMED
+  affects: [interferometry.vibration_noise]
+  category: instrument
+
+- id: IF.vibration_one_over_f_share
+  description: >-
+    Split of the vibration shape's own variance between the 1/f term and the resonance
+    term, at the reference window. Set to an even split "since nothing in the docs favours
+    one over the other" (see the module docstring) — an explicit statement that this is a
+    default, not a sourced figure. Retirement path: the same measured vibration power
+    spectral density, decomposed into its 1/f and resonant components, which would replace
+    the even split with a measured ratio.
+  value: 0.5
+  units: dimensionless
+  class: ASSUMED
+  affects: [interferometry.vibration_noise]
+  category: instrument
+
+- id: IF.vibration_upper_bandwidth_hz
+  description: >-
+    Upper frequency the vibration model integrates to; above this, the floated optical
+    table (doc 02 IF-G2) is taken to isolate the interferometer effectively. No document
+    quantifies where that isolation becomes effective. Retirement path: the same measured
+    vibration power spectral density or accelerometer characterisation, extended far
+    enough in frequency to show where the table's isolation actually rolls off the
+    residual noise.
+  value: 1.0e4
+  units: Hz
+  class: ASSUMED
+  affects: [interferometry.vibration_noise]
+  category: instrument
+
+- id: IF.vibration_reference_window_s
+  description: >-
+    Acquisition window at which the vibration-variance calibration is anchored to
+    IF-P1's quoted 0.1 mrad total (doc 02 §8.2). Doc 02 §8.2 states the phase-noise figure
+    without naming an integration time; 1 ms was picked as "representative" for this
+    >= 1 MHz-bandwidth (IF-4) channel, but no derivation ties the two together — a 1 MHz
+    bandwidth implies a 1 microsecond sample time, a thousand times shorter than this
+    window. Retirement path: the actual integration time used when the IF-P1 0.1 mrad
+    figure was characterised (vendor datasheet or bench test for the heterodyne
+    detection chain), which would pin this to the real calibration condition instead of a
+    guess.
+  value: 1.0e-3
+  units: s
+  class: ASSUMED
+  affects: [interferometry.vibration_noise]
+  category: instrument

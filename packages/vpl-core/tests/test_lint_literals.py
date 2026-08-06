@@ -190,8 +190,21 @@ class TestTheCommandLineGate:
 
     def test_a_clean_tree_exits_zero(self, tmp_path: Path) -> None:
         (tmp_path / "a.py").write_text("SPEED = 0.61\n")
+        empty_registry_dir = tmp_path / "registry"
+        empty_registry_dir.mkdir()
 
-        assert main([str(tmp_path), "--assumed-baseline", str(tmp_path / "none.json")]) == 0
+        assert (
+            main(
+                [
+                    str(tmp_path),
+                    "--assumed-baseline",
+                    str(tmp_path / "none.json"),
+                    "--registry-dir",
+                    str(empty_registry_dir),
+                ]
+            )
+            == 0
+        )
 
     def test_a_finding_exits_nonzero_and_prints_it(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -243,5 +256,22 @@ class TestTheCommandLineGate:
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         # The strictest reading, and the right default: doc 09 §1's target is zero, so an
-        # absent baseline must not silently mean "anything goes".
-        assert main([str(tmp_path), "--assumed-baseline", str(tmp_path / "absent.json")]) == 0
+        # absent baseline must not silently mean "anything goes". Uses an empty isolated
+        # registry (see test_a_clean_tree_exits_zero) rather than the shipped one, so this
+        # test asserts the gate's own zero-baseline logic and not "the shipped registry
+        # currently happens to have no ASSUMED entries".
+        empty_registry_dir = tmp_path / "registry"
+        empty_registry_dir.mkdir()
+
+        assert (
+            main(
+                [
+                    str(tmp_path),
+                    "--assumed-baseline",
+                    str(tmp_path / "absent.json"),
+                    "--registry-dir",
+                    str(empty_registry_dir),
+                ]
+            )
+            == 0
+        )

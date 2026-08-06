@@ -3,11 +3,27 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
 
+from vpl.core.params import ParameterRegistry, default_registry
 from vpl.instruments.thomson import photons
+
+
+def _registry_with(overrides: dict[str, float]) -> ParameterRegistry:
+    """The shipped registry with one or more entries' ``value`` swapped out.
+
+    Used to prove a value is actually *read* from the registry rather than copied into a
+    local literal at import time (doc 00 C1): if changing the registry entry changes the
+    computed result, the code path goes through the registry; if it does not, the
+    registry entry is decorative.
+    """
+    entries = dict(default_registry().entries)
+    for entry_id, value in overrides.items():
+        entries[entry_id] = replace(entries[entry_id], value=value)
+    return ParameterRegistry(entries)
 
 
 class TestPhotoelectronsPerShot:
@@ -176,3 +192,35 @@ class TestRayleighCalibrationChain:
             photons.OPTICAL_STABILITY_UNCERTAINTY,
         )
         assert max(terms) < photons.CALIBRATION_PHOTON_STATISTICS_UNCERTAINTY
+
+
+class TestStrayLightPedestalScaleIsRegistered:
+    """doc 00 C1: the stray-light pedestal magnitude was an invented number with no
+    citable source (see the module docstring's honest flag) that never reached the
+    registry. ``TS.stray_light_pedestal_scale`` fixes that — registered ASSUMED, and read
+    at call time rather than held as a bare module literal.
+    """
+
+    def test_the_registry_entry_resolves_and_is_classed_assumed(self) -> None:
+        entry = default_registry()["TS.stray_light_pedestal_scale"]
+        assert entry.provenance_class.value == "ASSUMED"
+        assert entry.value == pytest.approx(1.0)
+        assert entry.units == "dimensionless"
+
+    def test_the_pedestal_scales_with_the_registry_entry_not_a_hardcoded_copy(self) -> None:
+        default_pedestal = photons.stray_light_pedestal_pe_per_shot()
+        doubled_registry = _registry_with({"TS.stray_light_pedestal_scale": 2.0})
+
+        doubled_pedestal = photons.stray_light_pedestal_pe_per_shot(registry=doubled_registry)
+
+        assert doubled_pedestal == pytest.approx(2.0 * default_pedestal)
+
+    def test_a_zeroed_registry_entry_zeroes_the_stray_spectrum(self) -> None:
+        axis = np.array([520.0, 532.0, 544.0])
+        zeroed_registry = _registry_with({"TS.stray_light_pedestal_scale": 0.0})
+
+        spectrum = photons.stray_light_spectrum_pe_per_shot(
+            axis, notch_width_nm=1.25, registry=zeroed_registry
+        )
+
+        np.testing.assert_allclose(spectrum, 0.0)

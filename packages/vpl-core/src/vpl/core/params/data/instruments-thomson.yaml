@@ -1,0 +1,52 @@
+# Thomson scattering channel — ASSUMED-class entries only (doc 02 §7, §4.3).
+#
+# Every other Thomson number (laser energy, collection solid angle, spectral geometry,
+# the doc 02 §4.3 rejection-stack factors, the doc 06 §5 Rayleigh calibration chain, ...)
+# is a named, doc-cited `Final` constant in `vpl.instruments.thomson.photons` and
+# `vpl.instruments.thomson.spectrum` — doc 08 §5's escape hatch, exercised the same way
+# `vpl.instruments.oes` and `vpl.instruments.lif` exercise it. This file exists for the
+# two numbers in that package that are not a citable source: they were picked by whoever
+# wrote the module, doc 00 C1 calls that a defect, and a defect that is not in the
+# register is a defect nobody is tracking. Both entries below are read at call time by
+# `vpl.instruments.thomson.photons` and `vpl.instruments.thomson.instrument` — see the
+# `TS.*` cross-references there — rather than held as local literals.
+
+- id: TS.stray_light_pedestal_scale
+  description: >-
+    Ratio of the residual stray-light pedestal (what gets through the doc 02 §4.3
+    five-measure rejection stack) to the genuine Thomson signal at RP-1. Doc 02 §4.3 states
+    that the pedestal "is not set to zero in the model. It is a parameter with a nominal
+    value and an uncertainty" and calls it the dominant background-subtraction systematic,
+    but it does not give the pre-rejection coupling fraction (how much of a 0.5 J pulse
+    geometrically couples into the collection solid angle via window/wall scattering
+    before any rejection measure acts) that would let one be derived from first
+    principles — inventing that coupling fraction would itself be the doc 00 §6
+    parameter-fog trap. 1.0 is a bare stand-in, chosen only so the pedestal is "large
+    enough to matter" as doc 02 §4.3 requires rather than negligible; it is not a measured
+    or computed ratio. Retirement path: a stray-light characterisation shot — the TS-L1
+    laser fired with the plasma off (or the chamber evacuated) so the detector sees only
+    the rejection stack's residual leakage against a known pulse energy — would measure
+    this ratio directly and replace the stand-in with a calibrated number.
+  value: 1.0
+  units: dimensionless
+  class: ASSUMED
+  affects: [thomson.stray_light_pedestal, thomson.background_subtraction]
+  category: instrument
+
+- id: TS.maximum_reasonable_accumulation_s
+  description: >-
+    Maximum single-point accumulation this channel is treated as schedulable within,
+    used only to derive the doc 01 IF-6 detection floor by inverting the photon budget's
+    1/n_e scaling of the required accumulation time (doc 02 §7.1). Doc 02 quantifies the
+    photon budget itself in detail — 0.16 photoelectrons/shot at RP-1, ~700 s for 3 % —
+    but gives no operational campaign-length bound; 8 hours (one working shift) is a
+    modelling stand-in for "how long a single point may reasonably run", not a figure
+    doc 02 states or implies. Retirement path: an actual experiment run plan or beam-time
+    allocation policy (doc 10, or a future operations document) stating the maximum dwell
+    time budgeted for one Thomson point, which would replace this stand-in with a
+    scheduling constraint someone actually decided on.
+  value: 28800.0
+  units: s
+  class: ASSUMED
+  affects: [thomson.detection_floor]
+  category: instrument

@@ -7,11 +7,12 @@ Plain module-level helpers, not a shared ``conftest.py`` — see the note at the
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
 
-from vpl.core.params import default_registry
+from vpl.core.params import ParameterRegistry, default_registry
 from vpl.core.protocols import (
     CalibrationReference,
     CalibrationSet,
@@ -37,7 +38,7 @@ from vpl.instruments.interferometry.instrument import (
     PHASE_UNITS,
     InterferometryInstrument,
 )
-from vpl.instruments.interferometry.phase import N_CHORDS
+from vpl.instruments.interferometry.phase import N_CHORDS, PHASE_RESOLUTION_RAD
 
 _GRID = SpatialGrid(z_m=np.linspace(0.0, 5.0e-2, 26))
 _WINDOW = AcquisitionWindow.absolute(start=Q_(0.0, "s"), duration=Q_(1.0e-3, "s"))
@@ -454,3 +455,54 @@ class TestCalibrationScaleDoesNotAverageDown:
 
         np.testing.assert_allclose(first_observed, first_expected, rtol=1.0e-9)
         np.testing.assert_allclose(second_observed, second_expected, rtol=1.0e-9)
+
+
+class TestVibrationModelIsReadFromTheRegistry:
+    """doc 00 C1: the six ``IF.vibration_*`` ASSUMED entries (see
+    ``test_interferometry_noise.py``) have to reach the instrument's ``observe``, not just
+    the ``noise`` module in isolation — a registry entry the instrument never consults is
+    not actually "read from the registry", whatever the module that defines it does.
+    """
+
+    def test_zeroing_the_common_mode_fraction_changes_the_reported_uncertainty(self) -> None:
+        # Away from the reference window (1 ms), the combined uncertainty is not pinned
+        # to PHASE_RESOLUTION_RAD by construction (module docstring), so a fraction of
+        # 0.0 (no vibration term at any duration) and the shipped 0.9 must disagree here.
+        long_window = AcquisitionWindow.absolute(start=Q_(0.0, "s"), duration=Q_(1.0, "s"))
+        state = _state()
+
+        default_instrument = InterferometryInstrument(root_seed=5)
+        default_instrument.configure(InstrumentConfig(values={}))
+        default_instrument.calibrate(_references())
+        default_uncertainty = default_instrument.observe(state, long_window).uncertainty
+
+        entries = dict(default_registry().entries)
+        entries["IF.vibration_common_mode_fraction"] = replace(
+            entries["IF.vibration_common_mode_fraction"], value=0.0
+        )
+        no_vibration_registry = ParameterRegistry(entries)
+        zeroed_instrument = InterferometryInstrument(root_seed=5, registry=no_vibration_registry)
+        zeroed_instrument.configure(InstrumentConfig(values={}))
+        zeroed_instrument.calibrate(_references())
+        zeroed_uncertainty = zeroed_instrument.observe(state, long_window).uncertainty
+
+        assert not np.allclose(default_uncertainty, zeroed_uncertainty)
+        np.testing.assert_allclose(zeroed_uncertainty, PHASE_RESOLUTION_RAD)
+
+    def test_the_likelihood_covariance_reflects_a_moved_resonance_frequency(self) -> None:
+        # A longer window than the reference one lets the resonance frequency actually
+        # move the vibration term's magnitude (module docstring: only the *shape*
+        # integral, which the resonance frequency parametrises, depends on duration).
+        long_window = AcquisitionWindow.absolute(start=Q_(0.0, "s"), duration=Q_(1.0, "s"))
+        default_sigma = interferometry_noise.vibration_phase_std_rad(long_window.duration_s)
+
+        entries = dict(default_registry().entries)
+        entries["IF.vibration_resonance_frequency_hz"] = replace(
+            entries["IF.vibration_resonance_frequency_hz"], value=500.0
+        )
+        moved_registry = ParameterRegistry(entries)
+        moved_sigma = interferometry_noise.vibration_phase_std_rad(
+            long_window.duration_s, registry=moved_registry
+        )
+
+        assert moved_sigma != pytest.approx(default_sigma)

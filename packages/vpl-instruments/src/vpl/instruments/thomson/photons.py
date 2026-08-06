@@ -42,19 +42,20 @@ one." :func:`combined_rejection_factor` computes the doc 02 §4.3 stack and
 :func:`stray_light_spectrum_pe_per_shot` gives the residual pedestal that
 :mod:`vpl.instruments.thomson.instrument` adds into the raw (pre-subtraction) signal.
 
-**Honest flag on the pedestal's absolute size.** Doc 02 §4.3 states that a nominal value
-and uncertainty exist; it does not give the pre-rejection baseline needed to compute one
-from first principles (how much of a 0.5 J pulse geometrically couples into the collection
-solid angle via window/wall scattering before any of the five rejection measures act is
-not specified anywhere in docs 01-09, and inventing a coupling-fraction number to derive
-one would be exactly the "parameter-fog" doc 00 warns against).
-:data:`STRAY_LIGHT_PEDESTAL_PE_PER_SHOT` is instead pinned to the same order of magnitude
-as the genuine signal at RP-1 — consistent
-with doc 02 §4.3 calling it "the dominant" background-subtraction systematic, i.e. large
-enough to matter rather than negligible — and the uncertainty on its *subtraction*
+**Honest flag on the pedestal's absolute size, and where the flag now lives.** Doc 02 §4.3
+states that a nominal value and uncertainty exist; it does not give the pre-rejection
+baseline needed to compute one from first principles (how much of a 0.5 J pulse
+geometrically couples into the collection solid angle via window/wall scattering before
+any of the five rejection measures act is not specified anywhere in docs 01-09, and
+inventing a coupling-fraction number to derive one would be exactly the "parameter-fog"
+doc 00 warns against). :func:`stray_light_pedestal_pe_per_shot` is therefore
+``TS.stray_light_pedestal_scale`` (registered ``ASSUMED``, doc 00 C1) times the genuine
+signal at RP-1, with the nominal scale of 1.0 chosen only so the pedestal is "large enough
+to matter" as doc 02 §4.3 requires rather than negligible — not a measured or computed
+ratio. Doc 00 C1 makes an unsourced value a *defect*, and a defect that stays a bare module
+literal is one nobody is tracking; registering it is what makes the honest flag load-bearing
+rather than decorative prose. The uncertainty on the pedestal's *subtraction*
 (:data:`STRAY_LIGHT_BACKGROUND_RELATIVE_UNCERTAINTY`) is doc 06 §4 term 11's booked 2 %.
-This is a documented modelling choice, not a doc-sourced number; see the WBS 2.7 handoff
-report.
 
 ## Rayleigh calibration uncertainty chain (doc 02 §7.3, §11; doc 06 §5)
 
@@ -83,6 +84,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from vpl.core.constants import CLASSICAL_ELECTRON_RADIUS, PLANCK, SPEED_OF_LIGHT
+from vpl.core.params import ParameterRegistry, default_registry
 from vpl.core.units import magnitude_in
 from vpl.instruments.thomson.spectrum import LASER_WAVELENGTH_M, LASER_WAVELENGTH_NM
 
@@ -107,7 +109,6 @@ __all__ = [
     "REPETITION_RATE_HZ",
     "SPATIAL_RESOLUTION_M",
     "STRAY_LIGHT_BACKGROUND_RELATIVE_UNCERTAINTY",
-    "STRAY_LIGHT_PEDESTAL_PE_PER_SHOT",
     "STRAY_LIGHT_REJECTION_MARGIN",
     "STRAY_LIGHT_REJECTION_REQUIREMENT",
     "THOMSON_CROSS_SECTION_M2",
@@ -119,6 +120,7 @@ __all__ = [
     "required_accumulation_s",
     "required_shots",
     "shots_in_window",
+    "stray_light_pedestal_pe_per_shot",
     "stray_light_spectrum_pe_per_shot",
     "total_photoelectrons",
 ]
@@ -324,21 +326,34 @@ def combined_rejection_factor() -> float:
 
 
 #: Doc 06 §4 term 11: the background-subtraction systematic on Gamma_E. Used here as the
-#: relative uncertainty on the *subtraction* of :data:`STRAY_LIGHT_PEDESTAL_PE_PER_SHOT`
-#: (see the module docstring's honest flag on this figure's provenance).
+#: relative uncertainty on the *subtraction* of
+#: :func:`stray_light_pedestal_pe_per_shot` (see the module docstring's honest flag on
+#: that figure's provenance).
 STRAY_LIGHT_BACKGROUND_RELATIVE_UNCERTAINTY: Final[float] = 0.02
 
-#: The residual stray-light pedestal at RP-1, pinned to the RP-1 signal level itself — see
-#: the module docstring. Independent of ``n_e`` in :func:`stray_light_spectrum_pe_per_shot`
-#: (unlike the genuine Thomson signal): stray light comes from the laser pulse scattering
-#: off windows and chamber walls, not from the plasma, so it does not scale with density —
-#: which is exactly why it is proportionally worse at low ``n_e`` than at RP-1 and above.
-STRAY_LIGHT_PEDESTAL_PE_PER_SHOT: Final[float] = photoelectrons_per_shot(
-    REFERENCE_OPERATING_DENSITY_M3
-)
+
+def stray_light_pedestal_pe_per_shot(*, registry: ParameterRegistry | None = None) -> float:
+    """The residual stray-light pedestal at RP-1, one shot's worth — doc 02 §4.3.
+
+    ``TS.stray_light_pedestal_scale`` (registered ``ASSUMED``, doc 00 C1 — see the module
+    docstring's honest flag) times the genuine RP-1 signal
+    (:func:`photoelectrons_per_shot`); read from the registry rather than pinned as a
+    module constant so the doc 00 C1 defect this figure represents stays a single,
+    greppable registry entry instead of a number buried in this module.
+
+    Independent of ``n_e`` in :func:`stray_light_spectrum_pe_per_shot` (unlike the genuine
+    Thomson signal): stray light comes from the laser pulse scattering off windows and
+    chamber walls, not from the plasma, so it does not scale with density — which is
+    exactly why it is proportionally worse at low ``n_e`` than at RP-1 and above.
+    """
+    entries = registry if registry is not None else default_registry()
+    scale = float(entries.value_in("TS.stray_light_pedestal_scale", "dimensionless"))
+    return scale * photoelectrons_per_shot(REFERENCE_OPERATING_DENSITY_M3)
 
 
-def stray_light_spectrum_pe_per_shot(axis_nm: FloatArray, *, notch_width_nm: float) -> FloatArray:
+def stray_light_spectrum_pe_per_shot(
+    axis_nm: FloatArray, *, notch_width_nm: float, registry: ParameterRegistry | None = None
+) -> FloatArray:
     """Per-channel residual stray-light photoelectrons, one shot's worth — doc 02 §4.3.
 
     Modelled as a Gaussian pedestal centred on
@@ -354,10 +369,14 @@ def stray_light_spectrum_pe_per_shot(axis_nm: FloatArray, *, notch_width_nm: flo
             (:mod:`vpl.instruments.thomson.instrument`) passes the detector's own channel
             spacing, since doc 02 does not specify a notch leakage width independently and
             the channel spacing is the finest scale the detector can resolve regardless.
+        registry: Where :func:`stray_light_pedestal_pe_per_shot` reads
+            ``TS.stray_light_pedestal_scale`` from. ``None`` (the default) uses the
+            shipped registry.
     """
+    pedestal = stray_light_pedestal_pe_per_shot(registry=registry)
     offset = np.asarray(axis_nm, dtype=np.float64) - LASER_WAVELENGTH_NM
     shape = np.exp(-((offset / notch_width_nm) ** 2))
-    return STRAY_LIGHT_PEDESTAL_PE_PER_SHOT * shape
+    return pedestal * shape
 
 
 # ── Rayleigh calibration uncertainty chain — doc 02 §7.3, §11; doc 06 §5 ────────────

@@ -1,4 +1,4 @@
 {
-  "assumed_count": 0,
-  "_comment": "doc 00 C1: the ASSUMED-class count is a tracked project metric and its increase fails the build. doc 09 §1 sets the target to zero before Phase 2 exit. Raising this number is a deliberate, reviewable act."
+  "assumed_count": 8,
+  "_comment": "doc 00 C1: the ASSUMED-class count is a tracked project metric and its increase fails the build. doc 09 §1 sets the target to zero before Phase 2 exit. Raising this number is a deliberate, reviewable act. Raised from 0 to 8 for two invented Thomson numbers (TS.stray_light_pedestal_scale, TS.maximum_reasonable_accumulation_s) and six invented interferometry vibration-model numbers (IF.vibration_*) that were previously undeclared literals/Final constants with no citable source — see instruments-thomson.yaml and instruments-interferometry.yaml. This is the metric catching a real gap, not a regression."
 }

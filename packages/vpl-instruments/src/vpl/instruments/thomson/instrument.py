@@ -94,6 +94,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import special
 
+from vpl.core.params import ParameterRegistry, default_registry
 from vpl.core.protocols import (
     Calibration,
     CalibrationSet,
@@ -204,15 +205,21 @@ class ThomsonInstrument:
         "_calibration",
         "_calibration_rng",
         "_noise_enabled",
+        "_registry",
         "_rng",
         "_settings",
         "instrument_id",
     )
 
     def __init__(
-        self, *, root_seed: int, instrument_id: InstrumentId = THOMSON_INSTRUMENT_ID
+        self,
+        *,
+        root_seed: int,
+        instrument_id: InstrumentId = THOMSON_INSTRUMENT_ID,
+        registry: ParameterRegistry | None = None,
     ) -> None:
         self.instrument_id = instrument_id
+        self._registry = registry if registry is not None else default_registry()
         self._settings: _Settings | None = None
         self._calibration: Calibration | None = None
         self._applied_state = CalibrationState.ESTIMATED
@@ -361,7 +368,9 @@ class ThomsonInstrument:
         per_shot = photons.photoelectrons_per_shot(electron_density_m3)
         signal = weights * (per_shot * shots)
         stray = (
-            photons.stray_light_spectrum_pe_per_shot(axis_nm, notch_width_nm=CHANNEL_WIDTH_NM)
+            photons.stray_light_spectrum_pe_per_shot(
+                axis_nm, notch_width_nm=CHANNEL_WIDTH_NM, registry=self._registry
+            )
             * shots
         )
         raw_expected = signal + stray
@@ -545,7 +554,7 @@ class ThomsonInstrument:
             ),
             detection_floor=DetectionFloor(
                 quantity="n_0",
-                threshold=Q_(_detection_floor_n_0_m3(), "m**-3"),
+                threshold=Q_(_detection_floor_n_0_m3(registry=self._registry), "m**-3"),
                 requirement="IF-6",
             ),
             description=(
@@ -580,25 +589,24 @@ class ThomsonInstrument:
         return self._calibration
 
 
-#: Maximum accumulation a single Thomson point is treated as schedulable within — one
-#: working shift. Doc 02 does not give an operational campaign-length bound, so this is a
-#: documented modelling choice (not a doc-sourced number; see the WBS 2.7 handoff report),
-#: used only to derive :func:`_detection_floor_n_0_m3` below.
-_MAXIMUM_REASONABLE_ACCUMULATION_S: Final[float] = 8.0 * 3600.0
-
-
-def _detection_floor_n_0_m3() -> float:
+def _detection_floor_n_0_m3(*, registry: ParameterRegistry) -> float:
     """The doc 01 IF-6 floor: below this, even the doc 02 §7.1 3 % target needs longer
-    than :data:`_MAXIMUM_REASONABLE_ACCUMULATION_S`.
+    than ``TS.maximum_reasonable_accumulation_s``.
+
+    ``TS.maximum_reasonable_accumulation_s`` (registered ``ASSUMED``, doc 00 C1) is the
+    maximum accumulation a single Thomson point is treated as schedulable within — one
+    working shift, nominally. Doc 02 does not give an operational campaign-length bound;
+    see the registry entry's description for the retirement path. Read from the registry
+    rather than held as a module constant so the doc 00 C1 defect stays a single,
+    greppable entry.
 
     ``required_accumulation_s`` scales as ``1/n_e`` (:func:`photoelectrons_per_shot` is
     linear in ``n_e``), so inverting it against the accumulation budget gives the density
     floor directly rather than a second independently-chosen number.
     """
+    maximum_accumulation_s = float(registry.value_in("TS.maximum_reasonable_accumulation_s", "s"))
     accumulation_at_rp1_s = photons.required_accumulation_s(
         electron_density_m3=photons.REFERENCE_OPERATING_DENSITY_M3,
         target_relative_uncertainty=photons.DEFAULT_TARGET_RELATIVE_UNCERTAINTY,
     )
-    return photons.REFERENCE_OPERATING_DENSITY_M3 * (
-        accumulation_at_rp1_s / _MAXIMUM_REASONABLE_ACCUMULATION_S
-    )
+    return photons.REFERENCE_OPERATING_DENSITY_M3 * (accumulation_at_rp1_s / maximum_accumulation_s)

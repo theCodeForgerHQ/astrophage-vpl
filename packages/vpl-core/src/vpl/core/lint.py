@@ -230,7 +230,7 @@ def check_tree(root: Path) -> list[LiteralFinding]:
 # ── the CI gate ─────────────────────────────────────────────────────────────────
 
 
-def _report_assumed_count(baseline_path: Path) -> int:
+def _report_assumed_count(baseline_path: Path, *, registry_dir: Path | None = None) -> int:
     """Print the doc 00 C1 metric and return a process exit code.
 
     doc 00 C1 says the ASSUMED count "is a tracked project metric and is reported in
@@ -241,10 +241,24 @@ def _report_assumed_count(baseline_path: Path) -> int:
     An absent baseline is read as zero rather than as "no opinion". doc 09 §1's target is
     zero, so the strict reading is also the correct default; the alternative would let a
     deleted baseline file silently disable the gate.
-    """
-    from vpl.core.params import default_registry
 
-    registry = default_registry()
+    Args:
+        baseline_path: The committed ASSUMED-count baseline (doc 00 C1).
+        registry_dir: Load the parameter registry from here instead of the package's own
+            shipped ``data/`` directory. ``None`` (the default, and what the real CLI
+            gate always uses) reads the actual project registry — this exists so the
+            gate's own tests can point it at an isolated, empty directory rather than
+            asserting a fixed count against whatever the shipped registry currently
+            contains, which would make every test in this class depend on the shipped
+            registry never gaining an ASSUMED entry.
+    """
+    from vpl.core.params import ParameterRegistry, default_registry
+
+    registry = (
+        ParameterRegistry.load(sorted(registry_dir.glob("*.yaml")))
+        if registry_dir is not None
+        else default_registry()
+    )
     counts = registry.count_by_class()
     current = registry.assumed_count
 
@@ -292,6 +306,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path("metrics/assumed-baseline.json"),
         help="committed baseline for the ASSUMED count; absent is read as zero",
     )
+    parser.add_argument(
+        "--registry-dir",
+        type=Path,
+        default=None,
+        help=(
+            "load the parameter registry from here instead of the package's own data/ "
+            "directory; the real CI gate never sets this, it exists for testing the "
+            "gate itself in isolation from the shipped registry"
+        ),
+    )
     args = parser.parse_args(argv)
 
     findings: list[LiteralFinding] = []
@@ -303,7 +327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if findings:
         print(f"\nFAIL: {len(findings)} unregistered numeric literal(s).")
 
-    metric_code = _report_assumed_count(args.assumed_baseline)
+    metric_code = _report_assumed_count(args.assumed_baseline, registry_dir=args.registry_dir)
     return 1 if findings else metric_code
 
 

@@ -6,10 +6,12 @@ of ``oes_system.py`` for why.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
-from vpl.core.params import default_registry
+from vpl.core.params import ParameterRegistry, default_registry
 from vpl.core.protocols import (
     CalibrationReference,
     CalibrationSet,
@@ -98,6 +100,20 @@ def _configured(**overrides: object) -> ThomsonInstrument:
     instrument = ThomsonInstrument(root_seed=7)
     instrument.configure(InstrumentConfig(values=dict(overrides)))
     return instrument
+
+
+def _registry_with(overrides: dict[str, float]) -> ParameterRegistry:
+    """The shipped registry with one or more entries' ``value`` swapped out.
+
+    Used to prove a value is actually *read* from the registry rather than copied into a
+    local literal at import time (doc 00 C1): if changing the registry entry changes the
+    computed result, the code path goes through the registry; if it does not, the
+    registry entry is decorative.
+    """
+    entries = dict(default_registry().entries)
+    for entry_id, value in overrides.items():
+        entries[entry_id] = replace(entries[entry_id], value=value)
+    return ParameterRegistry(entries)
 
 
 def _references() -> CalibrationSet:
@@ -386,3 +402,59 @@ class TestWavelengthAxis:
         assert axis[0] > 520.0
         assert axis[-1] < 545.0
         assert axis[1] - axis[0] == pytest.approx(CHANNEL_WIDTH_NM)
+
+
+class TestAssumedAccumulationBudgetIsRegistered:
+    """doc 00 C1: the 8-hour maximum-accumulation budget behind the doc 01 IF-6 detection
+    floor was an invented number with no citable source (see the module docstring near
+    ``_detection_floor_n_0_m3``). ``TS.maximum_reasonable_accumulation_s`` fixes that —
+    registered ASSUMED, and read from the registry rather than held as a bare literal.
+    """
+
+    def test_the_registry_entry_resolves_and_is_classed_assumed(self) -> None:
+        entry = default_registry()["TS.maximum_reasonable_accumulation_s"]
+        assert entry.provenance_class.value == "ASSUMED"
+        assert entry.value == pytest.approx(8.0 * 3600.0)
+        assert entry.units == "s"
+
+    def test_a_wider_accumulation_budget_lowers_the_detection_floor(self) -> None:
+        # required_accumulation_s(...) scales as 1/n_e, so the floor is proportional to
+        # 1/budget; quadrupling the budget must quarter the floor, not merely change it.
+        default_floor = _configured().metadata().detection_floor.threshold.magnitude
+
+        wider_registry = _registry_with(
+            {"TS.maximum_reasonable_accumulation_s": 8.0 * 3600.0 * 4.0}
+        )
+        instrument = ThomsonInstrument(root_seed=7, registry=wider_registry)
+        instrument.configure(InstrumentConfig(values={}))
+
+        wider_floor = instrument.metadata().detection_floor.threshold.magnitude
+
+        assert wider_floor == pytest.approx(default_floor / 4.0)
+
+
+class TestAssumedStrayLightPedestalAffectsObserve:
+    """doc 00 C1: the same registry read proven at the ``photons`` module level in
+    ``test_thomson_photons.py`` also has to reach the instrument's ``observe`` — a
+    registry entry the instrument never consults is not actually "read from the
+    registry", whatever the module that defines it does internally.
+    """
+
+    def test_a_larger_pedestal_scale_widens_the_reported_uncertainty(self) -> None:
+        state = _state()
+
+        default_instrument = ThomsonInstrument(root_seed=3)
+        default_instrument.configure(InstrumentConfig(values={}))
+        default_instrument.calibrate(_references())
+        default_instrument.set_noise_enabled(False)
+        default_uncertainty = default_instrument.observe(state, _RP1_WINDOW).uncertainty
+
+        zeroed_registry = _registry_with({"TS.stray_light_pedestal_scale": 0.0})
+        zeroed_instrument = ThomsonInstrument(root_seed=3, registry=zeroed_registry)
+        zeroed_instrument.configure(InstrumentConfig(values={}))
+        zeroed_instrument.calibrate(_references())
+        zeroed_instrument.set_noise_enabled(False)
+        zeroed_uncertainty = zeroed_instrument.observe(state, _RP1_WINDOW).uncertainty
+
+        assert np.all(default_uncertainty >= zeroed_uncertainty)
+        assert np.any(default_uncertainty > zeroed_uncertainty)
