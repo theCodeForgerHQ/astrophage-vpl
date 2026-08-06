@@ -95,6 +95,11 @@ from vpl.core.state import (
     PlasmaState,
 )
 from vpl.core.units import Q_, magnitude_in
+from vpl.instruments.coherent import (
+    coherent_gaussian_log_prob,
+    fractional_calibration_row,
+    stack_coherent_rows,
+)
 from vpl.instruments.oes.cr import CollisionalRadiativeModel
 from vpl.instruments.oes.emissivity import chord_radiance, emission_spectrum
 from vpl.instruments.oes.lineshape import doppler_fwhm_nm
@@ -533,6 +538,7 @@ class OesInstrument:
         pred: Observable,
         *,
         coherent_discrepancy: FloatArray | None = None,
+        calibration_uncertainty: bool = False,
     ) -> LogProb:
         """This channel's term in the doc 05 §3.2 sum, with doc 05 §3.1's switch.
 
@@ -557,25 +563,61 @@ class OesInstrument:
                 this module must not import :mod:`vpl.inverse.discrepancy`. The caller
                 computes the vector; this method only knows it is a coherent standard
                 deviation.
+            calibration_uncertainty: Whether to score the doc 04 §7.3 radiometric
+                calibration as the coherent systematic it is — see **Calibration** below
+                for what it does, and why it is opt-in rather than always on.
 
         Notes:
-            When a discrepancy is supplied the whole channel switches to a **correlated
-            Gaussian**. Two reasons. Structural error is systematic, so it enters as a
-            rank-one term rather than on the diagonal — on the diagonal it would average
-            down as ``1/sqrt(n)`` across pixels and under-inflate the interval by that
-            factor. And once structural error dominates the counting statistics, mixing a
-            Poisson pmf with a correlated Gaussian is not a well-defined joint density
+            When a coherent term is supplied the whole channel switches to a **correlated
+            Gaussian**. Two reasons. Systematic error does not fluctuate per channel, so it
+            enters as a rank-one term rather than on the diagonal — on the diagonal it would
+            average down as ``1/sqrt(n)`` across pixels and under-inflate the interval by
+            that factor. And once systematic error dominates the counting statistics, mixing
+            a Poisson pmf with a correlated Gaussian is not a well-defined joint density
             anyway.
 
-            The rank-one structure is what makes this affordable: a dense covariance over a
-            1024-pixel detector would be a million entries to factor on every likelihood
-            evaluation. Sherman-Morrison gives the exact quadratic form and log-determinant
-            in ``O(n)``:
+            The rank-``k`` structure is what makes this affordable, and the Woodbury algebra
+            that exploits it lives in :mod:`vpl.instruments.coherent` — shared verbatim with
+            :meth:`~vpl.instruments.lif.instrument.LifInstrument.likelihood` so that the two
+            channels' treatments of a coherent error cannot drift apart. See that module's
+            docstring for the identity and for the ``1 + a`` overweighting factor a diagonal
+            treatment applies.
 
-                r' S^-1 r  =  r'D^-1 r - (r'D^-1 v)^2 / (1 + v'D^-1 v)
-                log|S|     =  log|D| + log(1 + v'D^-1 v)
+        Calibration — doc 04 §7.3, doc 06 §4.1:
+            ``OES-C1.radiometric_uncertainty`` registers the absolute radiometric scale at
+            **6 % one-sigma**. Without ``calibration_uncertainty=True`` this likelihood
+            asserts that scale is exactly 1.0 — infinite confidence in a 6 %-uncertain
+            quantity, and the reason this method was over-confident. Enabled, the
+            calibration enters as one more coherent row, ``f * y_hat``: a fractional error
+            on the *whole* prediction, which is what a single radiometric scale factor
+            actually is (doc 06 §4.1: it "affects every point identically and does not
+            average down").
 
-            with ``D`` the diagonal counting variance and ``v`` the coherent discrepancy.
+            **Why opt-in rather than always on.** The inversion side genuinely should
+            account for it — assuming exact calibration *is* the defect — so the honest
+            default would be ``True``. It is ``False`` for one reason that outranks
+            elegance: T0 and T1 are published regression baselines (relative error
+            3.551501e-05 and 2.576373e-04, truth covered at both), doc 05 §7.2 makes a T0
+            failure a bug rather than a result, and a flipped default silently re-scores
+            every existing caller's posterior. Which runs carry calibration uncertainty is a
+            property of the *campaign*, not of this method, so the manifest-level caller
+            decides and this method obeys.
+
+            Two things keep that from becoming a licence to forget. First, asking for it on
+            a measurement whose :attr:`~vpl.core.state.CalibrationState` is ``TRUE`` is a
+            no-op: doc 04 §7.3 permits the true response "for verification", and a run that
+            used it has no calibration error to score, so the guard is on the *measurement's
+            own record* rather than on the caller remembering. Second, the row is built from
+            ``pred.values``, so it tracks whatever prediction is being scored rather than
+            being frozen at a value that could go stale.
+
+            One consequence the caller must weigh, because this module cannot: a row built
+            from ``pred.values`` makes the covariance a function of ``theta``, and
+            ``vpl.experiment.closed_loop`` records a measured instance of that coupling
+            *tightening* a posterior instead of widening it. A caller that wants the
+            plug-in treatment it adopted for the discrepancy term can get it by passing the
+            frozen ``f * y_hat(theta_plug_in)`` through ``coherent_discrepancy`` and leaving
+            this flag ``False``; the two routes reach the same rank-one algebra.
         """
         if obs.shape != pred.shape:
             raise ValueError(
@@ -599,30 +641,38 @@ class OesInstrument:
         poisson = counts * np.log(expected) - expected - special.gammaln(counts + 1.0)
         residual = observed - expected
         gaussian = -0.5 * residual**2 / expected - 0.5 * np.log(2.0 * math.pi * expected)
-        if coherent_discrepancy is None:
+
+        # Assemble the coherent directions, in radiance, before any of them is converted to
+        # counts. Order matters only for readability — the Woodbury form is invariant to the
+        # order of the basis rows — so calibration comes first because it is the term that is
+        # a property of the instrument rather than of the model being scored.
+        rows: list[FloatArray] = []
+        if calibration_uncertainty and obs.calibration is not CalibrationState.TRUE:
+            rows.append(
+                fractional_calibration_row(
+                    np.asarray(pred.values, dtype=np.float64),
+                    relative_uncertainty=self._radiometric_uncertainty(),
+                )
+            )
+        if coherent_discrepancy is not None:
+            rows.append(np.asarray(coherent_discrepancy, dtype=np.float64))
+
+        # A 1-D input is a single coherent direction; a 2-D input is a basis whose rows span
+        # the directions the error was actually observed to take (rank k). Both go through
+        # the same Woodbury path, with rank one as the k = 1 case — one code path rather than
+        # two that could disagree. `None` means nothing coherent was supplied, and the
+        # pre-existing uncorrelated likelihood is returned unchanged and bit for bit.
+        stacked = stack_coherent_rows(rows, expected_shape=expected.shape)
+        if stacked is None:
             return float(np.sum(np.where(bright, gaussian, poisson)))
 
-        # Correlated-Gaussian branch. `expected` is the Poisson variance in counts; the
-        # discrepancy arrives in radiance and is converted with the same factor. A 1-D input
-        # is a single coherent direction; a 2-D input is a basis whose rows span the
-        # directions the model error was actually observed to take (rank k). Both go through
-        # the same Woodbury path, with rank one as the k = 1 case — one code path rather than
-        # two that could disagree.
-        supplied = np.asarray(coherent_discrepancy, dtype=np.float64)
-        rows = supplied[None, ...] if supplied.shape == expected.shape else supplied
         # per_radiance is per *pixel* and broadcasts against the (spatial, pixel) prediction;
         # the basis is already flattened over both axes, so broadcast the factor to the
         # prediction's shape before flattening it too.
         flat_per_radiance = np.broadcast_to(
             np.asarray(per_radiance, dtype=np.float64), expected.shape
         ).reshape(-1)
-        basis = rows.reshape(rows.shape[0], -1) * flat_per_radiance
-        if basis.shape[1] != expected.size:
-            raise ValueError(
-                f"discrepancy basis spans {basis.shape[1]} channels but the prediction has "
-                f"{expected.size}; they describe the same channels."
-            )
-        flat_residual = residual.reshape(-1)
+        basis = stacked * flat_per_radiance
         # Floor the counting variance at one photoelectron. The Poisson/Gaussian switch above
         # protects the faint pixels by sending them to the Poisson branch; this branch is
         # Gaussian everywhere, so without a floor a pixel expecting ~0 counts gets weight
@@ -631,30 +681,25 @@ class OesInstrument:
         # they carry no discrepancy — pinned n_0 tightly and the discrepancy term had almost
         # no effect on the posterior width. Same constant and same reasoning as
         # vpl.inverse.likelihood's _MINIMUM_VARIANCE_COUNTS.
-        flat_variance = np.maximum(expected.reshape(-1), _MINIMUM_COUNTING_VARIANCE)
+        return coherent_gaussian_log_prob(
+            residual=residual.reshape(-1),
+            variance=np.maximum(expected.reshape(-1), _MINIMUM_COUNTING_VARIANCE),
+            basis=basis,
+        )
 
-        # Woodbury for Sigma = D + U^T U, with U the (k, n) basis:
-        #   r' Sigma^-1 r = r'D^-1 r - (U D^-1 r)' M^-1 (U D^-1 r),  M = I_k + U D^-1 U'
-        #   log|Sigma|    = log|D| + log|M|
-        # k is the number of sweep points (tens), so M is tiny and this stays O(n k^2)
-        # against the O(n^3) a dense 1024-pixel covariance would cost per evaluation.
-        weighted_residual = flat_residual / flat_variance
-        scaled_basis = basis / flat_variance
-        middle = np.eye(basis.shape[0]) + scaled_basis @ basis.T
-        projection = basis @ weighted_residual
-        quadratic = float(flat_residual @ weighted_residual) - float(
-            projection @ np.linalg.solve(middle, projection)
-        )
-        sign, log_middle = np.linalg.slogdet(middle)
-        if sign <= 0.0:
-            raise ValueError(
-                "the discrepancy-inflated covariance is not positive definite; the supplied "
-                "basis is degenerate"
-            )
-        log_det = float(np.sum(np.log(flat_variance))) + float(log_middle)
-        return float(
-            -0.5 * quadratic - 0.5 * log_det - 0.5 * flat_residual.size * math.log(2.0 * math.pi)
-        )
+    def _radiometric_uncertainty(self) -> float:
+        """One-sigma relative uncertainty of the absolute radiometric scale — doc 04 §7.3.
+
+        Read from ``OES-C1.radiometric_uncertainty`` (doc 02 §11's NIST FEL standard, 6 %)
+        rather than from the :class:`~vpl.core.protocols.instrument.Calibration` this
+        instrument may or may not hold, for two reasons. The likelihood is used by the
+        *inversion*, which scores predictions against a measurement it did not take and has
+        no calibration object of its own — ``closed_loop`` builds a separate, deliberately
+        uncalibrated instrument for exactly that role. And the registry entry is the
+        auditable one: doc 08 §5 wants the number to have a source, and a coefficient
+        carried on an object built elsewhere does not.
+        """
+        return float(self._registry.value_in("OES-C1.radiometric_uncertainty", "dimensionless"))
 
     def is_informative(self, state_guess: PlasmaParams) -> bool:
         """The doc 01 IF-6 gate applied to OES — see ``OES.detection_floor_n_0``."""
