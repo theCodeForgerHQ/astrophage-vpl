@@ -144,9 +144,7 @@ class TestFlatDirections:
             return float(-0.5 * (u[0] + u[1]) ** 2)
 
         with pytest.raises(PosteriorNotPositiveDefiniteError):
-            laplace_posterior(
-                np.zeros(2), log_likelihood=log_likelihood, prior=_FlatPrior()
-            )
+            laplace_posterior(np.zeros(2), log_likelihood=log_likelihood, prior=_FlatPrior())
 
     def test_the_refusal_names_the_flat_direction(self) -> None:
         # An error saying only "not positive definite" sends the reader to the optimiser.
@@ -156,9 +154,7 @@ class TestFlatDirections:
             return float(-0.5 * (u[0] + u[1]) ** 2)
 
         with pytest.raises(PosteriorNotPositiveDefiniteError) as excinfo:
-            laplace_posterior(
-                np.zeros(2), log_likelihood=log_likelihood, prior=_FlatPrior()
-            )
+            laplace_posterior(np.zeros(2), log_likelihood=log_likelihood, prior=_FlatPrior())
 
         message = str(excinfo.value)
         assert "eigenvalue" in message.lower()
@@ -172,9 +168,7 @@ class TestFlatDirections:
             return float(+0.5 * u @ u)
 
         with pytest.raises(PosteriorNotPositiveDefiniteError):
-            laplace_posterior(
-                np.zeros(2), log_likelihood=log_likelihood, prior=_FlatPrior()
-            )
+            laplace_posterior(np.zeros(2), log_likelihood=log_likelihood, prior=_FlatPrior())
 
 
 class TestCredibleIntervals:

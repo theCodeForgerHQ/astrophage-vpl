@@ -240,9 +240,7 @@ class LaplacePosterior:
         draws = self.mean + rng.standard_normal((n, self.mean.size)) @ factor.T
         return np.asarray(draws, dtype=np.float64)
 
-    def sample_parameters(
-        self, rng: np.random.Generator, n: int
-    ) -> tuple[ControlParameters, ...]:
+    def sample_parameters(self, rng: np.random.Generator, n: int) -> tuple[ControlParameters, ...]:
         """:meth:`sample`, mapped into physical units."""
         self._require_control_vector("physical samples")
         return tuple(ControlParameters.from_unconstrained(u) for u in self.sample(rng, n))

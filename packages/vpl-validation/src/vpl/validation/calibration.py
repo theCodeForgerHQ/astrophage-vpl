@@ -161,11 +161,7 @@ def wilson_interval(
     observed = successes / n
     denominator = 1.0 + z * z / n
     centre = (observed + z * z / (2.0 * n)) / denominator
-    spread = (
-        z
-        / denominator
-        * math.sqrt(observed * (1.0 - observed) / n + z * z / (4.0 * n * n))
-    )
+    spread = z / denominator * math.sqrt(observed * (1.0 - observed) / n + z * z / (4.0 * n * n))
     return max(0.0, centre - spread), min(1.0, centre + spread)
 
 
@@ -273,6 +269,4 @@ def _diagnose(values: FloatArray, *, pvalue: float) -> str:
         return "biased"
 
     spread = float(np.mean(np.abs(values - 0.5)))
-    return (
-        "overconfident" if spread > _UNIFORM_MEAN_ABSOLUTE_DEVIATION else "underconfident"
-    )
+    return "overconfident" if spread > _UNIFORM_MEAN_ABSOLUTE_DEVIATION else "underconfident"
