@@ -23,6 +23,7 @@ depends on — it is not a test of the harness's own arithmetic reproducing itse
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 
 import numpy as np
@@ -45,6 +46,7 @@ from vpl.experiment.closed_loop import (
     run_t1,
     run_t2,
 )
+from vpl.inverse.laplace import LaplaceValidity
 from vpl.inverse.parameters import ControlParameters
 from vpl.physics.analytic.sheath import GAMMA_I_COLD_ION, AnalyticSheathSolver, ion_energy_flux
 from vpl.physics.eedf.analytic import (
@@ -574,3 +576,92 @@ def test_closed_loop_report_is_the_documented_type() -> None:
     """A cheap smoke test that the public return type has not drifted from its own contract."""
     report = run_t0(seed=_SEED_A)
     assert isinstance(report, ClosedLoopReport)
+
+
+# ── the credible interval on Gamma_E ────────────────────────────────────────────
+
+
+@functools.cache
+def _t0_report() -> ClosedLoopReport:
+    """One T0 run, memoised — the loop is ~35 s and several tests read the same one."""
+    return _run(noise=False, seed=_SEED_A)
+
+
+class TestGammaECarriesACredibleInterval:
+    """doc 11 §9 item 5 and item 6 both depend on this existing.
+
+    The headline number of this whole project is a `Gamma_E` with an uncertainty on it. Up
+    to now `ClosedLoopReport` carried a point estimate and a relative error and no interval
+    at all, which means the flagship figure was a bare number — exactly what doc 05 §5 and
+    ADR-012 say this project must not publish. It is also a hard prerequisite for the
+    ablation (doc 11 §9 item 6), which is stated as "drop each channel, show the CI
+    inflate": with no CI there is nothing to inflate.
+    """
+
+    @pytest.mark.physics
+    def test_the_report_carries_an_interval_around_the_estimate(self) -> None:
+        report = _t0_report()
+
+        assert report.gamma_e_interval_w_per_m2 is not None
+        low, high = report.gamma_e_interval_w_per_m2
+        assert low < report.gamma_e_estimate_w_per_m2 < high
+
+    @pytest.mark.physics
+    def test_the_interval_is_asymmetric_because_gamma_e_is_non_linear_in_theta(self) -> None:
+        # Gamma_E ~ n_0 sqrt(T_e) is a non-linear function of several parameters, so no
+        # endpoint-transform shortcut applies to it (vpl.inverse.laplace's module docstring
+        # spells out when one does). The interval must therefore come from *sampling* the
+        # posterior and pushing each draw through the same functional. A symmetric interval
+        # would be the tell-tale of a delta-method linearisation applied where it does not
+        # belong.
+        report = _t0_report()
+        assert report.gamma_e_interval_w_per_m2 is not None
+        low, high = report.gamma_e_interval_w_per_m2
+        estimate = report.gamma_e_estimate_w_per_m2
+
+        below, above = estimate - low, high - estimate
+        assert abs(above - below) / (above + below) > 1e-6, (
+            "the interval is symmetric about the estimate, which a sampled non-linear "
+            "pushforward would not be"
+        )
+
+    @pytest.mark.physics
+    def test_a_wider_credible_level_gives_a_wider_interval(self) -> None:
+        narrow = _run(noise=False, seed=_SEED_A, credible_level=0.5)
+        wide = _run(noise=False, seed=_SEED_A, credible_level=0.99)
+
+        assert narrow.gamma_e_interval_w_per_m2 is not None
+        assert wide.gamma_e_interval_w_per_m2 is not None
+        assert wide.gamma_e_interval_w_per_m2[0] < narrow.gamma_e_interval_w_per_m2[0]
+        assert wide.gamma_e_interval_w_per_m2[1] > narrow.gamma_e_interval_w_per_m2[1]
+
+    @pytest.mark.physics
+    def test_the_interval_is_reproducible_from_the_seed(self) -> None:
+        # doc 00 E3. The posterior draws come from Stream.SAMPLER, so they must not shift
+        # when anything else in the run draws a different number of randoms.
+        first = _run(noise=False, seed=_SEED_A)
+        second = _run(noise=False, seed=_SEED_A)
+
+        assert first.gamma_e_interval_w_per_m2 == second.gamma_e_interval_w_per_m2
+
+    @pytest.mark.physics
+    def test_whether_the_truth_is_covered_is_reported_rather_than_left_to_the_reader(
+        self,
+    ) -> None:
+        # The question that decides whether a large relative error is an honest wide
+        # interval or an overconfident claim. Leaving it to be eyeballed off two numbers in
+        # a table is how it stops being checked.
+        report = _t0_report()
+
+        assert report.truth_within_interval is not None
+        low, high = report.gamma_e_interval_w_per_m2  # type: ignore[misc]
+        assert report.truth_within_interval == (low <= report.gamma_e_true_w_per_m2 <= high)
+
+    @pytest.mark.physics
+    def test_the_posterior_carries_its_unvalidated_label(self) -> None:
+        # ADR-012: the Laplace validity label must travel with the number, not live in a
+        # document that gets dropped.
+        report = _t0_report()
+
+        assert report.posterior is not None
+        assert report.posterior.validity is LaplaceValidity.UNVALIDATED

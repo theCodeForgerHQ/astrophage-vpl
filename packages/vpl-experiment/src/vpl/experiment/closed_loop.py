@@ -214,6 +214,11 @@ from vpl.instruments.oes.cr import CollisionalRadiativeModel
 from vpl.instruments.oes.instrument import EedfProvider, MaxwellianEedf, OesInstrument
 from vpl.instruments.oes.levels import ElectronImpactChannel, Level, LevelSystem, RadiativeChannel
 from vpl.instruments.oes.spectrograph import Spectrograph
+from vpl.inverse.laplace import (
+    LaplacePosterior,
+    PosteriorNotPositiveDefiniteError,
+    laplace_posterior,
+)
 from vpl.inverse.likelihood import gaussian_log_likelihood
 from vpl.inverse.map import MapResult, maximum_a_posteriori
 from vpl.inverse.parameters import ControlParameters, LogTransform
@@ -381,6 +386,18 @@ _T0_SIGMA_RELATIVE_SCALE: Final[float] = 1.0e-3
 #: typical T1 (noisy) relative error, which is what makes it "numerical" rather than
 #: "statistical" tolerance.
 T0_RELATIVE_TOLERANCE: Final[float] = 1.0e-3
+
+#: Central probability mass of the reported `Gamma_E` interval. 0.9 because that is the
+#: level doc 11 §9 item 5's coverage test is stated at, and reporting the interval at one
+#: level and checking calibration at another would make the check answer a question nobody
+#: asked.
+CREDIBLE_LEVEL: Final[float] = 0.9
+
+#: Posterior draws pushed through the `Gamma_E` functional. `ion_energy_flux` is closed
+#: form, so this costs microseconds and the Monte-Carlo error on a 90 % quantile at this
+#: count is well under a tenth of a percent — far below the model discrepancy the interval
+#: is describing.
+_POSTERIOR_SAMPLES: Final[int] = 20000
 
 #: Spatial grid: two sheath thicknesses (doc 01 R-SPAT-3 asks for >= 10 for the full
 #: physics domain; two is enough of the profile for the OES local-CR-solve dependence on
@@ -712,6 +729,10 @@ class ClosedLoopReport:
     T_e_hat_ev: float
     map_result: MapResult
     sealed: SealedTruth
+    gamma_e_interval_w_per_m2: tuple[float, float] | None
+    credible_level: float
+    posterior: LaplacePosterior | None
+    truth_within_interval: bool | None
 
 
 # ─── the loop itself ─────────────────────────────────────────────────────────────
@@ -834,6 +855,68 @@ def _generate_truth(
     return _resample_onto_grid(native_state, observation_grid), gamma_e
 
 
+def _gamma_e_interval(
+    result: MapResult,
+    *,
+    log_likelihood: Callable[[FloatArray], float],
+    prior: object,
+    reference: ControlParameters,
+    species: Species,
+    registry: ParameterRegistry,
+    inversion_solver: AnalyticSheathSolver,
+    seed: int,
+    credible_level: float,
+) -> tuple[LaplacePosterior | None, tuple[float, float] | None]:
+    """The credible interval on `Gamma_E`, by pushing posterior draws through it.
+
+    `Gamma_E` is non-linear in several parameters at once (`Gamma_i ~ n_0 sqrt(T_e)`), so
+    the exact endpoint transform `vpl.inverse.laplace` uses for a *marginal* does not apply
+    and a delta-method linearisation would carry an error nobody tracks. Sampling is the
+    honest route and it is nearly free here, because `ion_energy_flux` is closed form — no
+    forward solve is involved once the posterior exists.
+
+    Returns `(None, None)` when the Hessian is not positive definite. That is doc 05 §6's
+    null space (ADR-012), and it is a **result** about the experiment rather than a crash:
+    reporting an interval derived from a regularised singular Hessian would turn "this
+    combination is not identified" into "this combination is measured, with a large error
+    bar". The caller records the absence instead of inventing a number.
+    """
+    if not 0.0 < credible_level < 1.0:
+        raise ValueError(f"credible level must lie strictly in (0, 1), got {credible_level}")
+
+    try:
+        posterior = laplace_posterior(
+            result.unconstrained, log_likelihood=log_likelihood, prior=prior
+        )
+    except PosteriorNotPositiveDefiniteError:
+        return None, None
+
+    # Stream.SAMPLER (doc 10 §5) so these draws stay put when anything else in the run
+    # consumes a different number of randoms — doc 00 E3's bit-for-bit requirement.
+    draws = posterior.sample(generator(seed, Stream.SAMPLER), _POSTERIOR_SAMPLES)
+    fluxes = np.array(
+        [
+            magnitude_in(
+                ion_energy_flux(
+                    _to_plasma_params(
+                        _theta_from_unconstrained(u, reference=reference),
+                        species=species,
+                        registry=registry,
+                    ),
+                    h_l=inversion_solver.h_l,
+                    gamma_i=inversion_solver.gamma_i,
+                ),
+                "W/m**2",
+            )
+            for u in draws
+        ],
+        dtype=np.float64,
+    )
+    tail = 0.5 * (1.0 - credible_level)
+    low, high = np.quantile(fluxes, [tail, 1.0 - tail])
+    return posterior, (float(low), float(high))
+
+
 def _run(
     *,
     noise: bool,
@@ -841,6 +924,7 @@ def _run(
     truth_solver: AnalyticSheathSolver | FluidSheathSolver | None = None,
     truth_eedf_factory: Callable[[EnergyGrid], EedfProvider] | None = None,
     imperfect_calibration: bool | None = None,
+    credible_level: float = CREDIBLE_LEVEL,
 ) -> ClosedLoopReport:
     """doc 07 §3's protocol, steps 1-6, parametrised over doc 05 §7.1's mismatch axes.
 
@@ -937,6 +1021,22 @@ def _run(
         )
     )
 
+    # ── step 4b: the interval on Gamma_E, by pushing posterior draws through it ──
+    # Gamma_E is a non-linear function of several parameters, so the endpoint-transform
+    # shortcut that vpl.inverse.laplace uses for a *marginal* does not apply. Sampling is
+    # the honest route, and `ion_energy_flux` is closed form so it costs nothing.
+    posterior, gamma_e_interval = _gamma_e_interval(
+        result,
+        log_likelihood=log_likelihood,
+        prior=prior,
+        reference=reference,
+        species=species,
+        registry=registry,
+        inversion_solver=inversion_solver,
+        seed=seed,
+        credible_level=credible_level,
+    )
+
     # ── step 5: unseal, by committing the estimate at its tier ────────────────
     tier = tier_of_configuration(
         same_model=isinstance(resolved_truth_solver, AnalyticSheathSolver),
@@ -955,6 +1055,18 @@ def _run(
         T_e_hat_ev=theta_hat.T_e,
         map_result=result,
         sealed=sealed,
+        gamma_e_interval_w_per_m2=gamma_e_interval,
+        credible_level=credible_level,
+        posterior=posterior,
+        # Read after commit_estimate, so the seal is respected: this is the one question
+        # that decides whether a large relative error is an honest wide interval or an
+        # overconfident claim, and leaving it to be eyeballed off a table is how it stops
+        # being checked.
+        truth_within_interval=(
+            None
+            if gamma_e_interval is None
+            else bool(gamma_e_interval[0] <= float(sealed.value) <= gamma_e_interval[1])
+        ),
     )
 
 
