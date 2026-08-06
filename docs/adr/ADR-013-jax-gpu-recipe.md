@@ -88,3 +88,48 @@ the hypothesis alive to be finished.
   preference. Any throughput projection must use the FP64 figure.
 - This environment is deliberately separate from `vpl-fenicsx` and `urbantwin`, both of which
   are in active use. Nothing here modifies them.
+
+---
+
+## Addendum, 2026-08-06: the speedup was measured, and there is none
+
+ADR-013 as written said "the speedup is NOT yet measured, and must not be assumed". It has
+now been measured, on this device, and the answer changes the plan.
+
+Environment `jaxcu11py311` (Python 3.11.15, jax 0.4.13+cuda11.cudnn86, numpy 1.26.4),
+`[gpu(id=0)]` live at 309.9 GFLOP/s FP64. Particle-steps/s, using the solver's own cost
+model `2 x n_ppc x n_cells x n_steps`, same configuration on both devices in the same
+environment:
+
+| configuration | GPU | CPU (same env) | verdict |
+|---|---|---|---|
+| 34 cells, 400 ppc, 27 200 particles, 400 steps | 1.293e6 | 3.798e6 | **GPU 2.94x slower** |
+| 1000 cells, 1000 ppc, 2 000 000 particles, 100 steps | 8.330e6 | 9.323e6 | **GPU 1.12x slower** |
+
+**There is no speedup at any size tested, and the GPU never wins.** The cause is the one
+this module's docstring already documents rather than anything environmental: the loop is
+eager by design, because `deposit_cic`/`gather_cic` assert every particle is inside the
+domain and that assertion reads a concrete value which tracing forbids. Only the Poisson
+solve and the push are jitted, so every step pays a host-device round trip for two kernels
+that are a minority of the work. At 27 k particles the round trip dominates outright; at 2 M
+it nearly pays for itself and still loses.
+
+The ceiling is structural: **even an infinitely fast device only removes the jitted
+quarter.** DS-TRAIN needs the kernel restructured — the in-domain guard replaced by
+something traceable so the whole step can live inside one `lax.scan` — not a faster card.
+That is a substantially larger piece of work than the environment fix, and it is now the
+actual blocker on doc 11 WBS 3.1.
+
+### A discrepancy that must be resolved before any planning number is quoted
+
+The 5.70e7 particle-steps/s figure this project has been planning with **could not be
+reproduced on this machine on either device**; the best measured anywhere was 9.32e6, a
+factor of 6.1 short. The definitions agree — feeding 5.70e7 into the RP-1 production size
+(1.316e11 particle-steps) reproduces the published 132 days exactly — so this is not a
+units mismatch. Either that figure came from materially faster hardware, or it is wrong.
+
+Extrapolating from what was actually measured here: **914 days for DS-TRAIN on the GPU,
+817 days on this CPU**, against the 132 days on the books. Until the 5.70e7 is traced to a
+machine and a configuration, every schedule resting on it is unsound, and gate G-1.4's
+requirement to replace the doc 10 §3.2 estimate with a measurement is only half satisfied —
+the measurement now exists, and it disagrees with the number in use.
