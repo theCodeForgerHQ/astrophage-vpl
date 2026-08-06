@@ -96,6 +96,7 @@ and badly wrong on the next.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -107,6 +108,8 @@ __all__ = [
     "DiscrepancyModel",
     "FractionalDiscrepancy",
     "NoDiscrepancy",
+    "EmpiricalDiscrepancy",
+    "estimate_empirical_discrepancy",
     "estimate_hierarchy_discrepancy",
     "inflated_covariance",
     "inflated_variance",
@@ -314,3 +317,87 @@ def estimate_hierarchy_discrepancy(
         squared.append(relative**2)
 
     return FractionalDiscrepancy(fraction=np.sqrt(np.mean(np.stack(squared), axis=0)))
+
+
+@dataclass(frozen=True, slots=True)
+class EmpiricalDiscrepancy:
+    """Discrepancy covariance spanned by the *observed* model-error directions.
+
+    Why this exists, when :class:`FractionalDiscrepancy` already inflates variance: a single
+    coherent vector only de-weights the one direction it points along. Measured on T2, that
+    is not enough. The L0-vs-L1 error is a **shape** mismatch across the emission profile,
+    while the parameters move the profile's **amplitude**; the two are largely orthogonal, so
+    a rank-one term left the parameter directions almost fully weighted. The large posterior
+    eigenvalue fell only 1.66x where the rank-one algebra predicts ~300x if the discrepancy
+    and the sensitivity were parallel — which is exactly the diagnostic that they are not.
+
+    So the covariance is built from the model-error vectors themselves,
+
+        Sigma_disc = (1 / N) sum_i  d_i d_i^T ,   d_i = y_high(theta_i) - y_low(theta_i)
+
+    a rank-``N`` object that spans the directions the structural error is actually observed
+    to take. Stored as its basis ``d_i / sqrt(N)`` rather than as the assembled matrix: over
+    a 1024-pixel detector the matrix is a million entries, while the basis is ``N x 1024``
+    and Woodbury turns every likelihood evaluation into an ``O(n k^2)`` operation.
+
+    Attributes:
+        basis: Shape ``(k, n)``. ``Sigma_disc = basis.T @ basis`` by construction, so the
+            scaling by ``1/sqrt(N)`` belongs to whoever builds it.
+    """
+
+    basis: FloatArray
+
+    def __post_init__(self) -> None:
+        matrix = np.asarray(self.basis, dtype=np.float64)
+        if matrix.ndim != 2:
+            raise ValueError(f"a discrepancy basis must be (k, n), got shape {matrix.shape}")
+        if not np.all(np.isfinite(matrix)):
+            raise ValueError("the discrepancy basis contains non-finite entries")
+
+    def variance(self, prediction: ArrayLike) -> FloatArray:
+        """Marginal variance per channel — the diagonal of ``basis.T @ basis``.
+
+        Ignores ``prediction``: unlike :class:`FractionalDiscrepancy` this is an *absolute*
+        covariance measured in the observable's units, not a fraction of the signal, because
+        it was estimated from actual differences rather than assumed proportional.
+        """
+        del prediction
+        return np.asarray(np.sum(np.asarray(self.basis, dtype=np.float64) ** 2, axis=0))
+
+    def covariance(self, prediction: ArrayLike) -> FloatArray:
+        del prediction
+        matrix = np.asarray(self.basis, dtype=np.float64)
+        return np.asarray(matrix.T @ matrix)
+
+
+def estimate_empirical_discrepancy(
+    *,
+    low_fidelity: ForwardModel,
+    high_fidelity: ForwardModel,
+    thetas: Sequence[NDArray[np.float64]],
+) -> EmpiricalDiscrepancy:
+    """Collect the model-error directions over a parameter sweep — doc 05 §4.
+
+    Same discipline as :func:`estimate_hierarchy_discrepancy`: two model callables, **no
+    truth argument**, so this cannot become an inverse crime. The difference is what is
+    retained. That function collapses each difference to a per-channel magnitude and throws
+    the direction away; this one keeps the vectors, which is what lets the resulting
+    covariance overlap the directions the parameters actually move in.
+    """
+    if len(thetas) == 0:
+        raise ValueError(
+            "estimating a discrepancy needs at least one parameter draw; with none there is "
+            "nothing to compare and an empty basis would silently disable the correction"
+        )
+    rows: list[FloatArray] = []
+    for theta in thetas:
+        low = np.asarray(low_fidelity(theta), dtype=np.float64).reshape(-1)
+        high = np.asarray(high_fidelity(theta), dtype=np.float64).reshape(-1)
+        if low.shape != high.shape:
+            raise ValueError(
+                f"the two models returned different shapes ({low.shape} and {high.shape})"
+            )
+        rows.append(high - low)
+    return EmpiricalDiscrepancy(
+        basis=np.asarray(np.stack(rows) / math.sqrt(len(rows)), dtype=np.float64)
+    )

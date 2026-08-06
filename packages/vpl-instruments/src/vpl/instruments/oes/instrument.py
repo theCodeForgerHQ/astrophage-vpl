@@ -129,6 +129,14 @@ _DEFAULT_INSTRUMENT_ID: Final[InstrumentId] = "oes"
 _MINIMUM_VARIANCE_COUNTS: Final[float] = 1.0
 
 
+#: Smallest counting variance, in photoelectrons, the correlated-Gaussian branch of
+#: :meth:`OesInstrument.likelihood` will divide by. A pixel expecting no photons receives
+#: none with probability one; a zero-variance Gaussian there is infinitely confident about a
+#: perfectly ordinary observation. Mirrors ``_MINIMUM_VARIANCE_COUNTS`` in
+#: :mod:`vpl.inverse.likelihood`, for the same reason.
+_MINIMUM_COUNTING_VARIANCE: Final[float] = 1.0
+
+
 @runtime_checkable
 class EedfProvider(Protocol):
     """Supplies the EEDF the CR rate coefficients are integrated over — doc 04 §2.2.
@@ -519,7 +527,13 @@ class OesInstrument:
 
     # ── the likelihood and the gate ─────────────────────────────────────────────
 
-    def likelihood(self, obs: Measurement, pred: Observable) -> LogProb:
+    def likelihood(
+        self,
+        obs: Measurement,
+        pred: Observable,
+        *,
+        coherent_discrepancy: FloatArray | None = None,
+    ) -> LogProb:
         """This channel's term in the doc 05 §3.2 sum, with doc 05 §3.1's switch.
 
         Doc 05 §3.1: "Poisson for weak lines; Gaussian for bright lines above ~100 pe;
@@ -527,6 +541,41 @@ class OesInstrument:
         ``OES.poisson_gaussian_threshold``, and the switch is per *pixel* rather than per
         line, because within one line profile the wings are in the counting regime while
         the core is not.
+
+        Args:
+            obs: The measurement.
+            pred: The prediction to score it against.
+            coherent_discrepancy: Optional per-channel **standard deviation** of model
+                discrepancy, in the same radiance units as ``pred``, treated as fully
+                coherent across channels (doc 05 §4, doc 11 WBS 3.6). ``None`` keeps the
+                exact pre-existing behaviour, which is what T0 and T1 need — their model is
+                correct and their intervals already cover, so any perturbation is a
+                regression.
+
+                A plain array rather than a discrepancy object, deliberately: doc 08 §3 has
+                the inverse layer depending on the instrument layer and not the reverse, so
+                this module must not import :mod:`vpl.inverse.discrepancy`. The caller
+                computes the vector; this method only knows it is a coherent standard
+                deviation.
+
+        Notes:
+            When a discrepancy is supplied the whole channel switches to a **correlated
+            Gaussian**. Two reasons. Structural error is systematic, so it enters as a
+            rank-one term rather than on the diagonal — on the diagonal it would average
+            down as ``1/sqrt(n)`` across pixels and under-inflate the interval by that
+            factor. And once structural error dominates the counting statistics, mixing a
+            Poisson pmf with a correlated Gaussian is not a well-defined joint density
+            anyway.
+
+            The rank-one structure is what makes this affordable: a dense covariance over a
+            1024-pixel detector would be a million entries to factor on every likelihood
+            evaluation. Sherman-Morrison gives the exact quadratic form and log-determinant
+            in ``O(n)``:
+
+                r' S^-1 r  =  r'D^-1 r - (r'D^-1 v)^2 / (1 + v'D^-1 v)
+                log|S|     =  log|D| + log(1 + v'D^-1 v)
+
+            with ``D`` the diagonal counting variance and ``v`` the coherent discrepancy.
         """
         if obs.shape != pred.shape:
             raise ValueError(
@@ -550,7 +599,62 @@ class OesInstrument:
         poisson = counts * np.log(expected) - expected - special.gammaln(counts + 1.0)
         residual = observed - expected
         gaussian = -0.5 * residual**2 / expected - 0.5 * np.log(2.0 * math.pi * expected)
-        return float(np.sum(np.where(bright, gaussian, poisson)))
+        if coherent_discrepancy is None:
+            return float(np.sum(np.where(bright, gaussian, poisson)))
+
+        # Correlated-Gaussian branch. `expected` is the Poisson variance in counts; the
+        # discrepancy arrives in radiance and is converted with the same factor. A 1-D input
+        # is a single coherent direction; a 2-D input is a basis whose rows span the
+        # directions the model error was actually observed to take (rank k). Both go through
+        # the same Woodbury path, with rank one as the k = 1 case — one code path rather than
+        # two that could disagree.
+        supplied = np.asarray(coherent_discrepancy, dtype=np.float64)
+        rows = supplied[None, ...] if supplied.shape == expected.shape else supplied
+        # per_radiance is per *pixel* and broadcasts against the (spatial, pixel) prediction;
+        # the basis is already flattened over both axes, so broadcast the factor to the
+        # prediction's shape before flattening it too.
+        flat_per_radiance = np.broadcast_to(
+            np.asarray(per_radiance, dtype=np.float64), expected.shape
+        ).reshape(-1)
+        basis = rows.reshape(rows.shape[0], -1) * flat_per_radiance
+        if basis.shape[1] != expected.size:
+            raise ValueError(
+                f"discrepancy basis spans {basis.shape[1]} channels but the prediction has "
+                f"{expected.size}; they describe the same channels."
+            )
+        flat_residual = residual.reshape(-1)
+        # Floor the counting variance at one photoelectron. The Poisson/Gaussian switch above
+        # protects the faint pixels by sending them to the Poisson branch; this branch is
+        # Gaussian everywhere, so without a floor a pixel expecting ~0 counts gets weight
+        # 1/epsilon and dominates the entire likelihood. Measured consequence when it was
+        # missing: the near-zero pixels — which are also the pixels where L0 and L1 agree, so
+        # they carry no discrepancy — pinned n_0 tightly and the discrepancy term had almost
+        # no effect on the posterior width. Same constant and same reasoning as
+        # vpl.inverse.likelihood's _MINIMUM_VARIANCE_COUNTS.
+        flat_variance = np.maximum(expected.reshape(-1), _MINIMUM_COUNTING_VARIANCE)
+
+        # Woodbury for Sigma = D + U^T U, with U the (k, n) basis:
+        #   r' Sigma^-1 r = r'D^-1 r - (U D^-1 r)' M^-1 (U D^-1 r),  M = I_k + U D^-1 U'
+        #   log|Sigma|    = log|D| + log|M|
+        # k is the number of sweep points (tens), so M is tiny and this stays O(n k^2)
+        # against the O(n^3) a dense 1024-pixel covariance would cost per evaluation.
+        weighted_residual = flat_residual / flat_variance
+        scaled_basis = basis / flat_variance
+        middle = np.eye(basis.shape[0]) + scaled_basis @ basis.T
+        projection = basis @ weighted_residual
+        quadratic = float(flat_residual @ weighted_residual) - float(
+            projection @ np.linalg.solve(middle, projection)
+        )
+        sign, log_middle = np.linalg.slogdet(middle)
+        if sign <= 0.0:
+            raise ValueError(
+                "the discrepancy-inflated covariance is not positive definite; the supplied "
+                "basis is degenerate"
+            )
+        log_det = float(np.sum(np.log(flat_variance))) + float(log_middle)
+        return float(
+            -0.5 * quadratic - 0.5 * log_det - 0.5 * flat_residual.size * math.log(2.0 * math.pi)
+        )
 
     def is_informative(self, state_guess: PlasmaParams) -> bool:
         """The doc 01 IF-6 gate applied to OES — see ``OES.detection_floor_n_0``."""
