@@ -1424,17 +1424,944 @@ on somebody's phone and must not be able to fail an inversion."
 
 ---
 
-### Remaining tasks
+### Task 6: `request.py` — validated jury input
 
-The plan continues with Tasks 6–14. Rather than pad this file, I'll write them in the same
-level of detail in the next pass:
+Nothing reaches the queue unvalidated. `joint.without()` raises `KeyError` on an unknown
+channel name, and a typo that reached the worker would surface as a crashed run in front of
+the jury instead of a `422` on the phone that caused it.
+
+**Files:**
+- Create: `packages/vpl-jury/src/vpl/jury/request.py`
+- Test: `packages/vpl-jury/tests/test_request.py`
+
+**Interfaces:**
+- Consumes: `vpl.core.state.Fidelity`, `vpl.experiment.grid.Cell`, `EedfShape`.
+- Produces:
+  - `CHANNEL_NAMES: frozenset[str]` — `{"oes", "lif", "thomson", "interferometry"}`.
+  - `TRUTH_FIDELITIES: frozenset[str]` — `{"L0", "L1"}`.
+  - `MAX_SEED: int` — `2**32 - 1`.
+  - `RequestError(ValueError)`.
+  - `RunRequest` — frozen slots dataclass: `seed: int`, `ablate: str | None`, `truth: str`.
+  - `RunRequest.parse(cls, raw: Mapping[str, object]) -> RunRequest` — raises `RequestError`.
+  - `RunRequest.to_cell(self) -> Cell`.
+  - `RunRequest.fingerprint(self) -> str` — stable string used by the queue to dedupe.
+  - `RunRequest.to_json(self) -> str`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_request.py`:
+
+```python
+"""What a phone is allowed to ask for.
+
+Every rejection here is a rejection that would otherwise have become a crashed run on the
+projector. `joint.without()` raises `KeyError` on an unknown channel, and L2 truth raises
+`TruthArtefactRequiredError` because the PIC artefacts do not exist in this repo — so both
+are refused at the boundary, with a message aimed at the person holding the phone.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from vpl.core.state import Fidelity
+from vpl.jury.request import MAX_SEED, RequestError, RunRequest
+
+
+class TestParsing:
+    def test_a_minimal_request_parses(self) -> None:
+        request = RunRequest.parse({"seed": 8231, "truth": "L1", "ablate": "oes"})
+
+        assert request.seed == 8231
+        assert request.truth == "L1"
+        assert request.ablate == "oes"
+
+    def test_ablate_may_be_omitted_for_the_full_four_channel_set(self) -> None:
+        request = RunRequest.parse({"seed": 0, "truth": "L0"})
+
+        assert request.ablate is None
+
+    def test_a_missing_seed_is_refused(self) -> None:
+        with pytest.raises(RequestError, match="seed"):
+            RunRequest.parse({"truth": "L0"})
+
+    def test_a_non_integer_seed_is_refused(self) -> None:
+        with pytest.raises(RequestError, match="seed"):
+            RunRequest.parse({"seed": "eight", "truth": "L0"})
+
+    def test_a_bool_is_not_an_acceptable_seed(self) -> None:
+        # `isinstance(True, int)` is True in Python, so this needs an explicit guard or
+        # `{"seed": true}` silently becomes seed 1.
+        with pytest.raises(RequestError, match="seed"):
+            RunRequest.parse({"seed": True, "truth": "L0"})
+
+    def test_a_negative_seed_is_refused(self) -> None:
+        with pytest.raises(RequestError, match="seed"):
+            RunRequest.parse({"seed": -1, "truth": "L0"})
+
+    def test_a_seed_above_the_ceiling_is_refused(self) -> None:
+        with pytest.raises(RequestError, match="seed"):
+            RunRequest.parse({"seed": MAX_SEED + 1, "truth": "L0"})
+
+    def test_the_ceiling_itself_is_accepted(self) -> None:
+        request = RunRequest.parse({"seed": MAX_SEED, "truth": "L0"})
+
+        assert request.seed == MAX_SEED
+
+    def test_an_unknown_channel_is_refused_with_the_valid_names(self) -> None:
+        with pytest.raises(RequestError, match="interferometry"):
+            RunRequest.parse({"seed": 0, "truth": "L0", "ablate": "oees"})
+
+    def test_l2_truth_is_refused_because_the_artefacts_do_not_exist(self) -> None:
+        with pytest.raises(RequestError, match="L2"):
+            RunRequest.parse({"seed": 0, "truth": "L2"})
+
+    def test_an_unknown_truth_fidelity_is_refused(self) -> None:
+        with pytest.raises(RequestError, match="truth"):
+            RunRequest.parse({"seed": 0, "truth": "L7"})
+
+
+class TestTheCell:
+    def test_l0_truth_builds_a_t1_cell(self) -> None:
+        cell = RunRequest.parse({"seed": 0, "truth": "L0"}).to_cell()
+
+        assert cell.truth is Fidelity.L0
+        assert cell.inversion is Fidelity.L0
+        assert int(cell.tier) == 1
+
+    def test_l1_truth_builds_a_t2_cell(self) -> None:
+        cell = RunRequest.parse({"seed": 0, "truth": "L1"}).to_cell()
+
+        assert cell.truth is Fidelity.L1
+        assert cell.inversion is Fidelity.L0
+        assert int(cell.tier) == 2
+
+    def test_noise_and_calibration_are_always_on(self) -> None:
+        # T2 is the number quoted publicly, and `tier_of_configuration` refuses a
+        # mismatched-model run that skips either. Hard-coding them on means no request the
+        # jury can compose is refusable by the tier check.
+        cell = RunRequest.parse({"seed": 0, "truth": "L1"}).to_cell()
+
+        assert cell.noise is True
+        assert cell.imperfect_calibration is True
+        assert cell.calibration_uncertainty is True
+
+
+class TestTheFingerprint:
+    def test_identical_requests_share_a_fingerprint(self) -> None:
+        one = RunRequest.parse({"seed": 5, "truth": "L1", "ablate": "oes"})
+        other = RunRequest.parse({"seed": 5, "truth": "L1", "ablate": "oes"})
+
+        assert one.fingerprint() == other.fingerprint()
+
+    def test_a_different_seed_gives_a_different_fingerprint(self) -> None:
+        one = RunRequest.parse({"seed": 5, "truth": "L1"})
+        other = RunRequest.parse({"seed": 6, "truth": "L1"})
+
+        assert one.fingerprint() != other.fingerprint()
+
+    def test_ablating_nothing_is_distinguishable_from_ablating_a_channel(self) -> None:
+        full = RunRequest.parse({"seed": 5, "truth": "L1"})
+        ablated = RunRequest.parse({"seed": 5, "truth": "L1", "ablate": "oes"})
+
+        assert full.fingerprint() != ablated.fingerprint()
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_request.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'vpl.jury.request'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `packages/vpl-jury/src/vpl/jury/request.py`:
+
+```python
+"""What a phone may ask for, and why the refusals are where they are.
+
+Three things the jury controls: the seed, which channel to drop, and the truth fidelity.
+Everything else about the cell is fixed, and fixed deliberately.
+
+## Why noise and calibration are not exposed
+
+`tier_of_configuration` refuses a mismatched-model run that skips noise or skips the
+estimated response — correctly, because such a run has no tier it may be reported at. If
+those were jury-facing toggles, some combinations would raise `TierMismatchError` in front
+of the room. Pinning them on means **every request the interface can compose is valid**,
+which is worth more than the extra knobs.
+
+## Why the tier is not a control
+
+The tier is `Cell.tier`'s verdict on the configuration, not an input. The interface offers
+truth fidelity and *displays* the resulting tier. Presenting it as selectable would invert
+the causality, and doc 05 §7.2 treats a mislabelled tier as a project defect.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Final, Self
+
+from vpl.core.state import Fidelity
+from vpl.experiment.grid import Cell, EedfShape
+
+__all__ = [
+    "CHANNEL_NAMES",
+    "MAX_SEED",
+    "TRUTH_FIDELITIES",
+    "RequestError",
+    "RunRequest",
+]
+
+
+class RequestError(ValueError):
+    """A request the jury interface must refuse, with a message aimed at a phone."""
+
+
+#: The four channels, by the names `JointLikelihood.without()` knows them.
+CHANNEL_NAMES: Final[frozenset[str]] = frozenset({"oes", "lif", "thomson", "interferometry"})
+
+#: Truth fidelities the jury may select. L2 is absent: it needs a saved PIC artefact
+#: (`TruthArtefactRequiredError`) and none exists in this repository, so offering it would
+#: be offering a button that fails.
+TRUTH_FIDELITIES: Final[frozenset[str]] = frozenset({"L0", "L1"})
+
+#: Upper bound on a seed. NumPy's legacy seeding accepts a 32-bit value, and a bound makes
+#: "type whatever you like" safe rather than a route to an overflow somewhere downstream.
+MAX_SEED: Final[int] = 2**32 - 1
+
+#: The EEDF the truth's measurement is generated with. Druyvesteyn is the mismatch axis the
+#: measured baseline used, kept fixed so a jury run and the recorded baseline are comparable.
+_TRUTH_EEDF: Final[EedfShape] = EedfShape.DRUYVESTEYN
+
+
+@dataclass(frozen=True, slots=True)
+class RunRequest:
+    """One validated ask from one phone."""
+
+    seed: int
+    truth: str
+    ablate: str | None = None
+
+    @classmethod
+    def parse(cls, raw: Mapping[str, object]) -> Self:
+        """Validate an untrusted mapping — a decoded JSON body.
+
+        Raises:
+            RequestError: On anything the closed loop would later refuse. Every message is
+                written to be read by whoever is holding the phone.
+        """
+        return cls(
+            seed=_parse_seed(raw.get("seed")),
+            truth=_parse_truth(raw.get("truth")),
+            ablate=_parse_ablate(raw.get("ablate")),
+        )
+
+    def to_cell(self) -> Cell:
+        """The `Cell` this request denotes.
+
+        The inversion is always L0: it is the model the framework actually inverts with,
+        and pairing it against an L1 truth is what makes the run a T2.
+        """
+        return Cell(
+            truth=Fidelity(self.truth),
+            inversion=Fidelity.L0,
+            noise=True,
+            imperfect_calibration=True,
+            calibration_uncertainty=True,
+            truth_eedf=_TRUTH_EEDF,
+        )
+
+    def fingerprint(self) -> str:
+        """A stable identity for deduplication.
+
+        Two phones asking for the same thing while it is still queued should watch one run
+        rather than queue two, and on a machine where a run costs 30 seconds that is the
+        difference between a responsive demo and a stalled one.
+        """
+        return f"{self.truth}/{self.seed}/{self.ablate or '-'}"
+
+
+def _parse_seed(value: object) -> int:
+    # `isinstance(True, int)` is True, so booleans need excluding explicitly or a JSON
+    # `true` silently becomes seed 1 — a wrong run that looks like a real one.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RequestError(
+            f"seed must be a whole number between 0 and {MAX_SEED}, got {value!r}."
+        )
+    if not 0 <= value <= MAX_SEED:
+        raise RequestError(f"seed must lie between 0 and {MAX_SEED}, got {value}.")
+    return value
+
+
+def _parse_truth(value: object) -> str:
+    if value not in TRUTH_FIDELITIES:
+        if value == "L2":
+            raise RequestError(
+                "L2 truth needs a saved PIC solve, and this deployment has none. "
+                "Choose L0 (reported at T1) or L1 (reported at T2)."
+            )
+        raise RequestError(
+            f"truth must be one of {sorted(TRUTH_FIDELITIES)}, got {value!r}."
+        )
+    return str(value)
+
+
+def _parse_ablate(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    if value not in CHANNEL_NAMES:
+        raise RequestError(
+            f"unknown channel {value!r}; the four are {sorted(CHANNEL_NAMES)}. "
+            f"Omit it to fuse all four."
+        )
+    return str(value)
+```
+
+- [ ] **Step 4: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_request.py -v`
+Expected: 17 passed.
+
+- [ ] **Step 5: Verify lint and types**
+
+Run:
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+```
+Expected: clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/vpl-jury
+git commit -m "feat(jury): validate what a phone may ask for, at the boundary
+
+Seed, channel and truth fidelity only. Noise and calibration are pinned on
+so that every request the interface can compose has a tier — otherwise some
+combinations raise TierMismatchError in front of the room.
+
+L2 truth is refused with a reason: it needs a PIC artefact this repo does
+not have. A bool is refused as a seed explicitly, because isinstance(True,
+int) would otherwise make {\"seed\": true} a silent seed 1."
+```
+
+---
+
+### Task 7: `tape.py` — the append-only record
+
+**Files:**
+- Create: `packages/vpl-jury/src/vpl/jury/tape.py`
+- Test: `packages/vpl-jury/tests/test_tape.py`
+
+**Interfaces:**
+- Consumes: `vpl.jury.events.TapeEvent`, `validate`; `vpl.core.progress.ProgressEvent`.
+- Produces:
+  - `Tape` — constructed as `Tape(path: Path, *, now: Callable[[], str] = utc_now)`.
+  - `Tape.append(self, run_id: str, event: ProgressEvent) -> TapeEvent` — validates, assigns the next sequence number, stamps the time, writes one line, flushes and `fsync`s.
+  - `Tape.read_all(self) -> list[TapeEvent]` — replay; a truncated final line is dropped.
+  - `Tape.next_run_id(self) -> str` — `"r-0001"`-style, monotonic.
+  - `utc_now() -> str` — RFC 3339 with a `Z` suffix, second resolution.
+  - `TapeWriteError(OSError)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_tape.py`:
+
+```python
+"""The audit record. Append-only, because the ordering *is* the evidence.
+
+If the log could be rewritten, "the commitment was published before the estimate existed"
+would be a claim about the log rather than about the run. So there is no update path, no
+delete path, and every line is fsync'd before the next stage begins.
+"""
+
+from __future__ import annotations
+
+import itertools
+from pathlib import Path
+
+import pytest
+
+from vpl.core.progress import ProgressEvent
+from vpl.jury.events import EventFieldError
+from vpl.jury.tape import Tape, utc_now
+
+
+def _fixed_clock() -> object:
+    counter = itertools.count(1)
+    return lambda: f"2026-08-07T12:00:{next(counter):02d}Z"
+
+
+@pytest.fixture
+def tape(tmp_path: Path) -> Tape:
+    return Tape(tmp_path / "tape.jsonl", now=_fixed_clock())  # type: ignore[arg-type]
+
+
+class TestAppending:
+    def test_the_first_event_gets_sequence_one(self, tape: Tape) -> None:
+        stamped = tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+
+        assert stamped.seq == 1
+
+    def test_sequence_numbers_are_monotonic_across_runs(self, tape: Tape) -> None:
+        tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+        second = tape.append("r-0002", ProgressEvent(kind="reference_solved", payload={}))
+
+        assert second.seq == 2
+
+    def test_the_event_is_stamped_with_the_clock(self, tape: Tape) -> None:
+        stamped = tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+
+        assert stamped.at == "2026-08-07T12:00:01Z"
+
+    def test_an_invalid_payload_never_reaches_the_file(self, tape: Tape) -> None:
+        with pytest.raises(EventFieldError):
+            tape.append(
+                "r-0001",
+                ProgressEvent(kind="truth_solved", payload={"gamma_e_true_w_per_m2": 1.0}),
+            )
+
+        assert tape.read_all() == []
+
+    def test_each_line_is_flushed_so_a_reader_sees_it_immediately(self, tape: Tape) -> None:
+        tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+
+        # Read through a separate handle: buffered-but-unflushed content would be invisible.
+        assert tape.path.read_text(encoding="utf-8").count("\n") == 1
+
+
+class TestReplay:
+    def test_replay_returns_events_in_written_order(self, tape: Tape) -> None:
+        tape.append("r-0001", ProgressEvent(kind="truth_sealed", payload={"commitment": "a"}))
+        tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+
+        replayed = tape.read_all()
+
+        assert [event.kind for event in replayed] == ["truth_sealed", "reference_solved"]
+        assert [event.seq for event in replayed] == [1, 2]
+
+    def test_an_absent_file_replays_as_empty_rather_than_raising(self, tmp_path: Path) -> None:
+        assert Tape(tmp_path / "absent.jsonl").read_all() == []
+
+    def test_a_truncated_final_line_is_dropped(self, tape: Tape) -> None:
+        # The process can die mid-write. One partial record must not make the whole audit
+        # trail unreadable.
+        tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+        with tape.path.open("a", encoding="utf-8") as handle:
+            handle.write('{"seq": 2, "run_id": "r-0001"')
+
+        replayed = tape.read_all()
+
+        assert len(replayed) == 1
+
+    def test_a_corrupt_line_in_the_middle_still_raises(self, tape: Tape) -> None:
+        # Only the *last* line may be partial. Damage in the middle is not a crash
+        # artefact, and pretending it is would hide tampering.
+        tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+        with tape.path.open("a", encoding="utf-8") as handle:
+            handle.write("{not json\n")
+        tape.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+
+        with pytest.raises(ValueError, match="line 2"):
+            tape.read_all()
+
+
+class TestRunIds:
+    def test_ids_are_allocated_in_order(self, tape: Tape) -> None:
+        assert tape.next_run_id() == "r-0001"
+        assert tape.next_run_id() == "r-0002"
+
+    def test_ids_resume_past_what_is_already_on_disk(self, tmp_path: Path) -> None:
+        path = tmp_path / "tape.jsonl"
+        first = Tape(path)
+        run_id = first.next_run_id()
+        first.append(run_id, ProgressEvent(kind="reference_solved", payload={}))
+
+        resumed = Tape(path)
+
+        assert resumed.next_run_id() == "r-0002"
+
+    def test_sequence_numbers_resume_past_what_is_on_disk(self, tmp_path: Path) -> None:
+        path = tmp_path / "tape.jsonl"
+        first = Tape(path)
+        first.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+
+        resumed = Tape(path)
+        stamped = resumed.append("r-0001", ProgressEvent(kind="reference_solved", payload={}))
+
+        assert stamped.seq == 2
+
+
+class TestThereIsNoRewritePath:
+    def test_the_tape_exposes_no_mutating_api(self) -> None:
+        # Enumerated rather than asserted in prose: if someone adds `truncate` later, this
+        # fails and they have to justify it.
+        forbidden = {"update", "delete", "truncate", "rewrite", "clear", "remove"}
+
+        assert forbidden.isdisjoint(dir(Tape))
+
+
+class TestTheClock:
+    def test_it_is_rfc_3339_with_a_z_suffix(self) -> None:
+        stamped = utc_now()
+
+        assert stamped.endswith("Z")
+        assert len(stamped) == len("2026-08-07T12:00:00Z")
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_tape.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'vpl.jury.tape'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `packages/vpl-jury/src/vpl/jury/tape.py`:
+
+```python
+"""The audit record — append-only, because the ordering is the evidence.
+
+The demo's claim is not "our answer is accurate". It is "the truth was fixed before the
+estimate existed, and here is the log". A log with an update path would reduce that to a
+claim about the log, so this module has no update path: `append` and `read_all`, and a test
+that enumerates the mutating verbs it must not grow.
+
+## Why fsync, on a demo
+
+The alternative is losing the last few events when the process dies, and the last few
+events are the reveal. A run whose commitment survived but whose reveal did not looks
+exactly like a run that was abandoned when the answer came out wrong. Two hundred
+microseconds per event is a very cheap way to not have that conversation.
+
+## Why only the final line may be partial
+
+A process killed mid-write leaves one truncated record at the end, so tolerating that is
+crash recovery. Damage anywhere earlier is not a crash artefact — the writer had already
+moved past it — so it raises. Tolerating it would mean tolerating exactly the edit an
+inconvenient result would motivate.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Final
+
+from vpl.core.progress import ProgressEvent
+from vpl.jury.events import TapeEvent, validate
+
+__all__ = ["Tape", "TapeWriteError", "utc_now"]
+
+#: Width of the numeric part of a run id. Four digits is 9 999 runs, which is more than a
+#: judging session will ever produce and keeps the ids the same width on screen.
+_RUN_ID_DIGITS: Final[int] = 4
+
+
+class TapeWriteError(OSError):
+    """The record could not be written, so the run must not proceed."""
+
+
+def utc_now() -> str:
+    """RFC 3339, UTC, second resolution.
+
+    Second resolution because these timestamps are read by people establishing an ordering,
+    and the ordering is carried by the sequence number regardless.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Tape:
+    """An append-only JSONL record of every event of every run."""
+
+    def __init__(self, path: Path, *, now: Callable[[], str] = utc_now) -> None:
+        self.path = path
+        self._now = now
+        self._seq, self._runs = _resume_from(path)
+
+    def next_run_id(self) -> str:
+        """Allocate the next run id, continuing past anything already on disk."""
+        self._runs += 1
+        return f"r-{self._runs:0{_RUN_ID_DIGITS}d}"
+
+    def append(self, run_id: str, event: ProgressEvent) -> TapeEvent:
+        """Validate, stamp and durably record one event.
+
+        Validation happens first and deliberately: an event with a disallowed payload key
+        must never reach the file, because the file is what a juror audits.
+
+        Raises:
+            EventKindError, EventFieldError: The event is not permitted on the wire.
+            TapeWriteError: The record could not be written.
+        """
+        validate(event)
+        self._seq += 1
+        stamped = TapeEvent(
+            seq=self._seq,
+            run_id=run_id,
+            at=self._now(),
+            kind=event.kind,
+            payload=event.payload,
+        )
+        try:
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(stamped.to_json())
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as error:
+            raise TapeWriteError(
+                f"could not append to {self.path}: {error}. An unrecorded run cannot be "
+                f"verified afterwards, so the run must not proceed."
+            ) from error
+        return stamped
+
+    def read_all(self) -> list[TapeEvent]:
+        """Every event, in written order.
+
+        A truncated final line is dropped — see the module docstring. Anything earlier
+        raises.
+
+        Raises:
+            ValueError: A malformed line that is not the last.
+        """
+        if not self.path.is_file():
+            return []
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        events: list[TapeEvent] = []
+        for number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                events.append(TapeEvent.from_json(line))
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                if number == len(lines):
+                    break
+                raise ValueError(
+                    f"{self.path} is malformed at line {number}: {error}. Only a "
+                    f"truncated final line is treated as crash recovery; damage earlier "
+                    f"than that is not a crash artefact."
+                ) from error
+        return events
+
+
+def _resume_from(path: Path) -> tuple[int, int]:
+    """`(highest sequence number, highest run number)` already on disk.
+
+    Restarting the server must not reset either counter: a second event with `seq=1` would
+    make the ordering ambiguous exactly where it is load-bearing.
+    """
+    if not path.is_file():
+        return 0, 0
+    highest_seq = 0
+    highest_run = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = TapeEvent.from_json(line)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        highest_seq = max(highest_seq, event.seq)
+        _, _, digits = event.run_id.partition("-")
+        if digits.isdigit():
+            highest_run = max(highest_run, int(digits))
+    return highest_seq, highest_run
+```
+
+- [ ] **Step 4: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_tape.py -v`
+Expected: 16 passed.
+
+- [ ] **Step 5: Verify lint and types**
+
+Run:
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+```
+Expected: clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/vpl-jury
+git commit -m "feat(jury): the append-only tape
+
+No update path, no delete path, and a test that enumerates the mutating
+verbs it must not grow. Every line is fsync'd, because the events most
+likely to be lost to a crash are the reveal, and a run whose commitment
+survived but whose reveal did not looks exactly like an abandoned one.
+
+Only a truncated *final* line is tolerated: that is crash recovery.
+Damage earlier is not a crash artefact and raises."
+```
+
+---
+
+### Task 8: `worker.py` — one run, one subprocess, NDJSON out
+
+**Files:**
+- Create: `packages/vpl-jury/src/vpl/jury/worker.py`
+- Test: `packages/vpl-jury/tests/test_worker.py`
+
+**Interfaces:**
+- Consumes: `RunRequest`, `run_cell`, `ProgressEvent`.
+- Produces:
+  - `main(argv: Sequence[str] | None = None) -> int` — reads one JSON request from `argv[1]`, writes one NDJSON event per line to stdout, returns 0 on success and 1 on a refused request.
+  - Module runnable as `python -m vpl.jury.worker '<json>'`.
+
+**The stdout-purity requirement.** dolfinx's JIT emits `ld: warning` lines during the L1
+path. Those go to stderr, but one stray `print` anywhere in the dependency tree would
+corrupt the event stream irrecoverably. So the worker captures `sys.stdout` at entry, hands
+the real handle to the event writer, and rebinds `sys.stdout` to `sys.stderr` for the
+duration of the run. Anything that prints ends up on stderr where it is harmless.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_worker.py`:
+
+```python
+"""The worker: one run per process, events on stdout, everything else on stderr.
+
+Run in a real subprocess rather than by calling `main` in-process, because the property
+being tested is a property of the process's file descriptors. An in-process test would pass
+while the deployed thing emitted `ld: warning` into the middle of a JSON document.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+
+import pytest
+
+pytestmark = pytest.mark.slow
+
+
+def _run(request: dict[str, object]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "vpl.jury.worker", json.dumps(request)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+
+class TestAGoodRun:
+    def test_it_exits_zero(self) -> None:
+        result = _run({"seed": 0, "truth": "L0", "ablate": "oes"})
+
+        assert result.returncode == 0, result.stderr[-2000:]
+
+    def test_every_stdout_line_is_json(self) -> None:
+        result = _run({"seed": 0, "truth": "L0", "ablate": "oes"})
+
+        for number, line in enumerate(result.stdout.splitlines(), start=1):
+            try:
+                json.loads(line)
+            except json.JSONDecodeError as error:
+                pytest.fail(f"stdout line {number} is not JSON: {line!r} ({error})")
+
+    def test_the_documented_stages_all_appear(self) -> None:
+        result = _run({"seed": 0, "truth": "L0", "ablate": "oes"})
+
+        kinds = [json.loads(line)["kind"] for line in result.stdout.splitlines()]
+
+        for expected in (
+            "config_accepted",
+            "truth_solved",
+            "truth_sealed",
+            "estimate_committed",
+            "seal_opened",
+            "row",
+        ):
+            assert expected in kinds
+
+    def test_the_commitment_precedes_the_reveal(self) -> None:
+        result = _run({"seed": 0, "truth": "L0", "ablate": "oes"})
+
+        kinds = [json.loads(line)["kind"] for line in result.stdout.splitlines()]
+
+        assert kinds.index("truth_sealed") < kinds.index("seal_opened")
+
+
+class TestARefusedRequest:
+    def test_an_invalid_seed_exits_one_without_running_anything(self) -> None:
+        result = _run({"seed": -5, "truth": "L0"})
+
+        assert result.returncode == 1
+        assert result.stdout.strip() == ""
+
+    def test_the_reason_goes_to_stderr(self) -> None:
+        result = _run({"seed": -5, "truth": "L0"})
+
+        assert "seed" in result.stderr
+
+    def test_a_missing_argument_exits_one(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "-m", "vpl.jury.worker"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+
+        assert result.returncode == 1
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_worker.py -v`
+Expected: FAIL — every case, `No module named vpl.jury.worker`.
+
+- [ ] **Step 3: Write the implementation**
+
+Create `packages/vpl-jury/src/vpl/jury/worker.py`:
+
+```python
+"""One run, one process, events on stdout.
+
+## Why a subprocess at all
+
+Three reasons, in order of how much they matter on the day. A Newton solve that dies takes
+the process with it, and that must not be the server. A run that overruns needs killing,
+and a thread cannot be killed. And dolfinx brings PETSc and MPI, which are not things to
+initialise inside an async server that also has to keep talking to six phones.
+
+## Why stdout is hijacked
+
+The event stream is newline-delimited JSON on stdout, and it has to stay that way. dolfinx's
+JIT prints linker warnings during the L1 path; they go to stderr today, and one library
+update that sends them to stdout would corrupt the stream in a way that looks like a parser
+bug. So the real stdout handle is taken at entry and `sys.stdout` is rebound to stderr for
+the rest of the run. Anything that prints lands somewhere harmless.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from collections.abc import Sequence
+from typing import TextIO
+
+from vpl.core.progress import ProgressEvent
+from vpl.experiment.grid import run_cell
+from vpl.jury.events import validate
+from vpl.jury.request import RequestError, RunRequest
+
+__all__ = ["main"]
+
+
+def _writer(stream: TextIO) -> object:
+    """A progress callback that writes one JSON object per line, flushed.
+
+    Flushed per event because the whole point is that a phone sees the stage while it is
+    happening. A buffered stream would deliver the entire run at once, which is a slower
+    version of the print statement this exists to replace.
+    """
+
+    def emit(event: ProgressEvent) -> None:
+        validate(event)
+        stream.write(json.dumps({"kind": event.kind, "payload": event.payload}))
+        stream.write("\n")
+        stream.flush()
+
+    return emit
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run one cell and stream its stages.
+
+    Returns:
+        0 on a completed run, 1 on a request that was refused before any work began.
+    """
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if len(arguments) != 1:
+        print(
+            "usage: python -m vpl.jury.worker '<json request>'",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        request = RunRequest.parse(json.loads(arguments[0]))
+    except (RequestError, json.JSONDecodeError, TypeError) as error:
+        print(f"refused: {error}", file=sys.stderr)
+        return 1
+
+    events = sys.stdout
+    # Everything downstream that prints must not reach the event stream.
+    sys.stdout = sys.stderr
+    try:
+        run_cell(
+            request.to_cell(),
+            seed=request.seed,
+            ablate=request.ablate,
+            progress=_writer(events),  # type: ignore[arg-type]
+        )
+    finally:
+        sys.stdout = events
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 4: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_worker.py -v`
+Expected: 7 passed. The four good-run cases each cost ~19 s.
+
+- [ ] **Step 5: Verify lint and types**
+
+Run:
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+```
+Expected: clean.
+
+- [ ] **Step 6: Confirm stdout purity on the L1 path**
+
+This is the case the purity guard exists for, and it needs dolfinx:
+
+```bash
+micromamba run -n vpl-t2 env PYTHONPATH=packages/vpl-core/src:packages/vpl-physics/src:packages/vpl-validation/src:packages/vpl-instruments/src:packages/vpl-inverse/src:packages/vpl-experiment/src:packages/vpl-jury/src \
+  python -m vpl.jury.worker '{"seed": 0, "truth": "L1", "ablate": "oes"}' > /tmp/events.ndjson 2>/tmp/worker.err
+python -c "import json,pathlib; [json.loads(l) for l in pathlib.Path('/tmp/events.ndjson').read_text().splitlines()]; print('stdout is pure JSON')"
+grep -c 'ld: warning' /tmp/worker.err
+```
+Expected: `stdout is pure JSON`, and a non-zero count of `ld: warning` lines **on stderr** — which is the demonstration that the guard is doing something real.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add packages/vpl-jury
+git commit -m "feat(jury): the worker — one run per process, NDJSON on stdout
+
+A subprocess because a dead Newton solve must not take the server with it,
+an overrunning run needs killing and a thread cannot be, and PETSc/MPI do
+not belong in an async server talking to six phones.
+
+stdout is hijacked at entry and sys.stdout rebound to stderr: dolfinx's
+JIT prints linker warnings on the L1 path, and one library update sending
+them to stdout would corrupt the stream in a way that reads as a parser bug."
+```
+
+---
+
+### Remaining tasks
 
 | Task | Deliverable |
 |---|---|
-| 6 | `request.py` — `RunRequest`, JSON ↔ `Cell`, validation of seed/channel/fidelity before anything is queued |
-| 7 | `tape.py` — append-only JSONL, run IDs, replay, tolerance of a truncated final line |
-| 8 | `worker.py` — subprocess entry point, NDJSON on stdout, stdout-purity test against dolfinx's JIT chatter |
-| 9 | End-to-end proof chain over a real L0/T1 run: ordering, commitment-before-estimate, no leak |
+| 9 | End-to-end proof chain over a real L0/T1 run through worker + tape: ordering, commitment-before-estimate, no leak, digest re-verified |
 | 10 | `queue.py` — FIFO, cap → 429, pending dedupe, timeout with SIGTERM→SIGKILL, cancellation |
 | 11 | `broker.py` + `server.py` — routes, SSE fanout, tape replay on connect, `Last-Event-ID` resume |
 | 12 | `verify.py` + `cli.py` — re-derive truth from seed in a fresh process, compare digest, detect tampering |
