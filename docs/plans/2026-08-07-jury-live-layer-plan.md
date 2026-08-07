@@ -3082,11 +3082,626 @@ worst available behaviour in a demo about not hiding things."
 
 ---
 
+### Task 11a: `broker.py` — subscriber fanout
+
+Split from the server because fanout has one responsibility and one interesting failure mode
+(a phone too slow to keep up), and it is worth testing without an HTTP layer in the way.
+
+**Files:**
+- Create: `packages/vpl-jury/src/vpl/jury/broker.py`
+- Test: `packages/vpl-jury/tests/test_broker.py`
+
+**Interfaces:**
+- Consumes: `vpl.jury.events.TapeEvent`.
+- Produces:
+  - `SubscriberOverflow(RuntimeError)`.
+  - `Broker(*, buffer=SUBSCRIBER_BUFFER)`.
+  - `Broker.publish(self, event: TapeEvent) -> None` — never blocks, never raises.
+  - `Broker.subscribe(self) -> AsyncIterator[TapeEvent]` — an async context manager yielding an iterator; unsubscribes on exit.
+  - `Broker.subscriber_count` property.
+  - `SUBSCRIBER_BUFFER: int = 256`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_broker.py`:
+
+```python
+"""Fanout to every connected phone, and what happens when one cannot keep up.
+
+A slow subscriber must not be able to slow the run down — `publish` is called from the
+queue's hot path, between recording one event and computing the next. So it never blocks.
+A subscriber that overflows is disconnected instead, and reconnects with `Last-Event-ID`,
+which is exactly the path a locked phone already takes.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from vpl.jury.broker import Broker
+from vpl.jury.events import TapeEvent
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+def _event(seq: int) -> TapeEvent:
+    return TapeEvent(
+        seq=seq, run_id="r-0001", at="2026-08-07T12:00:00Z", kind="reference_solved"
+    )
+
+
+class TestFanout:
+    async def test_a_subscriber_receives_a_published_event(self) -> None:
+        broker = Broker()
+
+        async with broker.subscribe() as stream:
+            broker.publish(_event(1))
+
+            assert await anext(stream) == _event(1)
+
+    async def test_every_subscriber_receives_the_same_event(self) -> None:
+        broker = Broker()
+
+        async with broker.subscribe() as first, broker.subscribe() as second:
+            broker.publish(_event(1))
+
+            assert await anext(first) == _event(1)
+            assert await anext(second) == _event(1)
+
+    async def test_order_is_preserved(self) -> None:
+        broker = Broker()
+
+        async with broker.subscribe() as stream:
+            broker.publish(_event(1))
+            broker.publish(_event(2))
+
+            assert [await anext(stream), await anext(stream)] == [_event(1), _event(2)]
+
+    async def test_leaving_the_context_unsubscribes(self) -> None:
+        broker = Broker()
+
+        async with broker.subscribe():
+            assert broker.subscriber_count == 1
+
+        assert broker.subscriber_count == 0
+
+    async def test_publishing_with_no_subscribers_is_harmless(self) -> None:
+        broker = Broker()
+
+        broker.publish(_event(1))
+
+        assert broker.subscriber_count == 0
+
+
+class TestASlowSubscriber:
+    async def test_publish_never_blocks_on_a_full_subscriber(self) -> None:
+        # The property that matters: this is called from the queue's hot path.
+        broker = Broker(buffer=2)
+
+        async with broker.subscribe():
+            for seq in range(1, 11):
+                broker.publish(_event(seq))
+
+    async def test_an_overflowing_subscriber_is_dropped(self) -> None:
+        broker = Broker(buffer=2)
+
+        async with broker.subscribe():
+            for seq in range(1, 11):
+                broker.publish(_event(seq))
+
+            assert broker.subscriber_count == 0
+
+    async def test_a_dropped_subscribers_stream_ends_rather_than_hanging(self) -> None:
+        # It must terminate, so the SSE response closes and the phone reconnects.
+        broker = Broker(buffer=2)
+
+        async with broker.subscribe() as stream:
+            for seq in range(1, 11):
+                broker.publish(_event(seq))
+
+            received = [event async for event in stream]
+
+        assert len(received) == 2
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_broker.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'vpl.jury.broker'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `packages/vpl-jury/src/vpl/jury/broker.py`:
+
+```python
+"""Fanout to connected phones.
+
+`publish` is called from the queue's hot path, between recording one event and starting the
+next stage, so it must never block and never raise. A phone on a saturated hotspot that
+cannot drain its buffer therefore gets **disconnected** rather than allowed to apply
+backpressure to the inversion.
+
+Dropping a subscriber is safe here in a way that dropping an *event* would not be. The tape
+is the record; the stream is a view of it. A disconnected phone reconnects and replays from
+`Last-Event-ID`, which is the same path a phone that was simply locked already takes — so
+the failure mode is one the system handles routinely rather than a special case.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from typing import Final
+
+from vpl.jury.events import TapeEvent
+
+__all__ = ["SUBSCRIBER_BUFFER", "Broker"]
+
+#: Events buffered per subscriber before it is dropped. A reference run emits on the order of
+#: thirty events, so 256 is several runs of slack — enough that only a genuinely stuck client
+#: overflows.
+SUBSCRIBER_BUFFER: Final[int] = 256
+
+
+class Broker:
+    """Publishes tape events to every current subscriber."""
+
+    def __init__(self, *, buffer: int = SUBSCRIBER_BUFFER) -> None:
+        self._buffer = buffer
+        self._subscribers: set[asyncio.Queue[TapeEvent | None]] = set()
+
+    @property
+    def subscriber_count(self) -> int:
+        return len(self._subscribers)
+
+    def publish(self, event: TapeEvent) -> None:
+        """Hand the event to every subscriber. Never blocks, never raises."""
+        for queue in list(self._subscribers):
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                # Sentinel first so the iterator terminates and the SSE response closes;
+                # the phone will reconnect and replay.
+                self._subscribers.discard(queue)
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(None)
+
+    @contextlib.asynccontextmanager
+    async def subscribe(self) -> AsyncIterator[AsyncIterator[TapeEvent]]:
+        """Yield an iterator of events published while subscribed."""
+        queue: asyncio.Queue[TapeEvent | None] = asyncio.Queue(maxsize=self._buffer)
+        self._subscribers.add(queue)
+        try:
+            yield _drain(queue)
+        finally:
+            self._subscribers.discard(queue)
+
+
+async def _drain(queue: asyncio.Queue[TapeEvent | None]) -> AsyncIterator[TapeEvent]:
+    while True:
+        event = await queue.get()
+        if event is None:
+            return
+        yield event
+```
+
+- [ ] **Step 4: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_broker.py -v`
+Expected: 8 passed.
+
+- [ ] **Step 5: Verify and commit**
+
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+git add packages/vpl-jury
+git commit -m "feat(jury): subscriber fanout that cannot slow a run down
+
+publish() is called from the queue's hot path, so it never blocks and never
+raises. A phone that cannot drain its buffer is disconnected rather than
+allowed to apply backpressure to an inversion.
+
+Dropping a subscriber is safe where dropping an event would not be: the
+tape is the record and the stream is a view of it, so a dropped phone
+reconnects and replays from Last-Event-ID — the same path a locked phone
+already takes."
+```
+
+---
+
+### Task 11b: `server.py` — routes and SSE
+
+**Files:**
+- Create: `packages/vpl-jury/src/vpl/jury/server.py`
+- Test: `packages/vpl-jury/tests/test_server.py`
+
+**Interfaces:**
+- Consumes: `RunQueue`, `Broker`, `Tape`, `RunRequest`, `RequestError`, `QueueFullError`.
+- Produces:
+  - `build_app(*, tape: Tape, queue: RunQueue, broker: Broker, join_url: str) -> Starlette`.
+  - Routes: `POST /runs`, `GET /events`, `GET /tape`, `GET /qr.svg`, `GET /health`, and `/` serving `static/index.html`.
+  - `sse_line(event: TapeEvent) -> str` — the exact SSE framing, pinned by a test.
+
+**Status codes:** `202` on admission, `422` on `RequestError`, `429` on `QueueFullError`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_server.py`:
+
+```python
+"""The HTTP surface. Six routes, three status codes, and one framing format.
+
+`TestClient` drives the real ASGI app. The queue is constructed with a fast fake command so
+no inversion runs — the routes' behaviour does not depend on the physics, and a test that
+took 19 s per case would not get run.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+from starlette.testclient import TestClient
+
+from vpl.jury.broker import Broker
+from vpl.jury.events import TapeEvent
+from vpl.jury.queue import RunQueue
+from vpl.jury.server import build_app, sse_line
+from vpl.jury.tape import Tape
+
+
+def _fast_command(request: object) -> list[str]:
+    payload = json.dumps({"kind": "reference_solved", "payload": {}})
+    return [sys.executable, "-c", f"print({json.dumps(payload)})"]
+
+
+@pytest.fixture
+def client(tmp_path: Path) -> TestClient:
+    tape = Tape(tmp_path / "tape.jsonl")
+    broker = Broker()
+    queue = RunQueue(tape, publish=broker.publish, command=_fast_command)
+    app = build_app(tape=tape, queue=queue, broker=broker, join_url="http://192.168.2.1:8000")
+    return TestClient(app)
+
+
+class TestSubmitting:
+    def test_a_valid_request_is_accepted(self, client: TestClient) -> None:
+        response = client.post("/runs", json={"seed": 8231, "truth": "L0", "ablate": "oes"})
+
+        assert response.status_code == 202
+        assert response.json()["run_id"] == "r-0001"
+        assert response.json()["position"] == 1
+
+    def test_an_invalid_seed_is_422_with_a_readable_reason(self, client: TestClient) -> None:
+        response = client.post("/runs", json={"seed": -1, "truth": "L0"})
+
+        assert response.status_code == 422
+        assert "seed" in response.json()["error"]
+
+    def test_an_unknown_channel_is_422(self, client: TestClient) -> None:
+        response = client.post("/runs", json={"seed": 0, "truth": "L0", "ablate": "oees"})
+
+        assert response.status_code == 422
+
+    def test_l2_truth_is_422_and_says_why(self, client: TestClient) -> None:
+        response = client.post("/runs", json={"seed": 0, "truth": "L2"})
+
+        assert response.status_code == 422
+        assert "L2" in response.json()["error"]
+
+    def test_a_full_queue_is_429(self, tmp_path: Path) -> None:
+        tape = Tape(tmp_path / "tape.jsonl")
+        broker = Broker()
+        queue = RunQueue(tape, publish=broker.publish, command=_fast_command, max_pending=1)
+        client = TestClient(
+            build_app(tape=tape, queue=queue, broker=broker, join_url="http://x")
+        )
+        client.post("/runs", json={"seed": 0, "truth": "L0"})
+
+        response = client.post("/runs", json={"seed": 1, "truth": "L0"})
+
+        assert response.status_code == 429
+
+    def test_a_non_json_body_is_422_rather_than_500(self, client: TestClient) -> None:
+        response = client.post("/runs", content=b"not json")
+
+        assert response.status_code == 422
+
+    def test_a_duplicate_reports_itself_as_one(self, client: TestClient) -> None:
+        client.post("/runs", json={"seed": 5, "truth": "L0"})
+
+        response = client.post("/runs", json={"seed": 5, "truth": "L0"})
+
+        assert response.json()["deduplicated"] is True
+
+
+class TestTheFraming:
+    def test_an_event_is_framed_with_its_sequence_as_the_id(self) -> None:
+        event = TapeEvent(
+            seq=7, run_id="r-0001", at="2026-08-07T12:00:00Z", kind="truth_sealed"
+        )
+
+        # Pinned: the id is what `Last-Event-ID` resumes from, and a phone served an older
+        # frontend must still be able to parse this.
+        assert sse_line(event) == f"id: 7\ndata: {event.to_json()}\n\n"
+
+
+class TestTheTapeRoute:
+    def test_it_serves_the_raw_record_for_download(self, client: TestClient) -> None:
+        client.post("/runs", json={"seed": 0, "truth": "L0"})
+
+        response = client.get("/tape")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/x-ndjson")
+
+    def test_an_empty_tape_is_an_empty_body_not_a_404(self, client: TestClient) -> None:
+        response = client.get("/tape")
+
+        assert response.status_code == 200
+        assert response.text == ""
+
+
+class TestHealthAndQr:
+    def test_health_reports_the_join_url(self, client: TestClient) -> None:
+        response = client.get("/health")
+
+        assert response.status_code == 200
+        assert response.json()["join_url"] == "http://192.168.2.1:8000"
+
+    def test_the_qr_is_an_svg(self, client: TestClient) -> None:
+        response = client.get("/qr.svg")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/svg+xml")
+        assert response.text.lstrip().startswith("<?xml") or "<svg" in response.text
+
+
+class TestTheIndex:
+    def test_the_root_serves_the_page(self, client: TestClient) -> None:
+        response = client.get("/")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/html")
+```
+
+Add `httpx` to the dev dependency group in the root `pyproject.toml`:
+
+```toml
+    "httpx>=0.27",
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_server.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'vpl.jury.server'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `packages/vpl-jury/src/vpl/jury/server.py`:
+
+```python
+"""The HTTP surface: submit a run, watch the tape, download the record.
+
+## Why SSE and not WebSocket
+
+The traffic is one-directional — the phone submits over POST and only ever receives
+afterwards — and SSE reconnects on its own, resuming from `Last-Event-ID`. On a hotspot
+serving phones that lock their screens mid-run, automatic resume is the feature that matters
+most, and getting it from the protocol is better than reimplementing it over a socket.
+
+## Why the tape is downloadable
+
+Leg 3 of the argument is that a juror can verify a run themselves. That requires the record
+in their hands, so `/tape` serves it verbatim as NDJSON. A demo that asks to be trusted about
+its own audit log has not made the argument.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Final
+
+import segno
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from starlette.responses import StreamingResponse
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
+
+from vpl.jury.broker import Broker
+from vpl.jury.events import TapeEvent
+from vpl.jury.queue import QueueFullError, RunQueue
+from vpl.jury.request import RequestError, RunRequest
+from vpl.jury.tape import Tape
+
+__all__ = ["build_app", "sse_line"]
+
+_STATIC: Final[Path] = Path(__file__).parent / "static"
+
+#: Starlette has no constant for this and the literals read worse than names at the call
+#: sites below.
+_ACCEPTED: Final[int] = 202
+_UNPROCESSABLE: Final[int] = 422
+_TOO_MANY: Final[int] = 429
+
+
+def sse_line(event: TapeEvent) -> str:
+    """One SSE frame.
+
+    The `id:` field is what a reconnecting phone sends back as `Last-Event-ID`, so it is the
+    sequence number and nothing else. Pinned by a test: a phone may be running a frontend
+    served ten minutes ago and must still parse this.
+    """
+    return f"id: {event.seq}\ndata: {event.to_json()}\n\n"
+
+
+def build_app(*, tape: Tape, queue: RunQueue, broker: Broker, join_url: str) -> Starlette:
+    """Assemble the app around already-constructed collaborators.
+
+    Dependencies are injected rather than built here so that a test can supply a queue whose
+    worker is a two-line script. A server that could only be constructed with the real
+    inversion attached would be a server nobody tested.
+    """
+
+    async def submit(request: Request) -> Response:
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return JSONResponse(
+                {"error": "body must be a JSON object"}, status_code=_UNPROCESSABLE
+            )
+        try:
+            parsed = RunRequest.parse(body)
+        except (RequestError, TypeError, AttributeError) as error:
+            return JSONResponse({"error": str(error)}, status_code=_UNPROCESSABLE)
+        try:
+            submission = queue.submit(parsed)
+        except QueueFullError as error:
+            return JSONResponse({"error": str(error)}, status_code=_TOO_MANY)
+        return JSONResponse(
+            {
+                "run_id": submission.run_id,
+                "position": submission.position,
+                "deduplicated": submission.deduplicated,
+            },
+            status_code=_ACCEPTED,
+        )
+
+    async def events(request: Request) -> Response:
+        resume_from = _resume_point(request)
+
+        async def stream() -> AsyncIterator[str]:
+            # Replay first, so a phone joining late — or reopening after a lock — sees the
+            # history rather than a blank screen. Read before subscribing: an event that
+            # lands between the two arrives twice, and a duplicate is recoverable on the
+            # client where a gap is not.
+            for recorded in tape.read_all():
+                if recorded.seq > resume_from:
+                    yield sse_line(recorded)
+            async with broker.subscribe() as live:
+                async for event in live:
+                    if event.seq > resume_from:
+                        yield sse_line(event)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"cache-control": "no-store", "x-accel-buffering": "no"},
+        )
+
+    async def raw_tape(request: Request) -> Response:  # noqa: ARG001 - route signature
+        lines = "".join(f"{event.to_json()}\n" for event in tape.read_all())
+        return PlainTextResponse(lines, media_type="application/x-ndjson")
+
+    async def qr(request: Request) -> Response:  # noqa: ARG001 - route signature
+        import io
+
+        buffer = io.StringIO()
+        segno.make(join_url, error="m").save(buffer, kind="svg", scale=8)
+        return Response(buffer.getvalue(), media_type="image/svg+xml")
+
+    async def health(request: Request) -> Response:  # noqa: ARG001 - route signature
+        return JSONResponse(
+            {
+                "join_url": join_url,
+                "subscribers": broker.subscriber_count,
+                "tape": str(tape.path),
+            }
+        )
+
+    async def index(request: Request) -> Response:  # noqa: ARG001 - route signature
+        return FileResponse(_STATIC / "index.html", media_type="text/html")
+
+    return Starlette(
+        routes=[
+            Route("/", index),
+            Route("/runs", submit, methods=["POST"]),
+            Route("/events", events),
+            Route("/tape", raw_tape),
+            Route("/qr.svg", qr),
+            Route("/health", health),
+            Mount("/static", StaticFiles(directory=_STATIC), name="static"),
+        ]
+    )
+
+
+def _resume_point(request: Request) -> int:
+    """The sequence number a reconnecting client already has.
+
+    `Last-Event-ID` is set by the browser automatically on reconnect. The query parameter is
+    the manual override, which is what makes the stream testable with a plain GET.
+    """
+    header = request.headers.get("last-event-id") or request.query_params.get("from")
+    if header is None:
+        return 0
+    try:
+        return int(header)
+    except ValueError:
+        # A malformed value must not deny service; replaying from the start is correct and
+        # merely wasteful.
+        return 0
+```
+
+- [ ] **Step 4: Create a placeholder index so the route resolves**
+
+Task 14 writes the real page. Create `packages/vpl-jury/src/vpl/jury/static/index.html` now so `GET /` does not 404:
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Astrophage VPL</title>
+  </head>
+  <body>
+    <p>The interface arrives in Task 14.</p>
+  </body>
+</html>
+```
+
+- [ ] **Step 5: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_server.py -v`
+Expected: 14 passed.
+
+- [ ] **Step 6: Verify and commit**
+
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+git add packages/vpl-jury pyproject.toml uv.lock
+git commit -m "feat(jury): the HTTP surface — submit, stream, download
+
+SSE rather than WebSocket: the traffic is one-directional and SSE resumes
+from Last-Event-ID by itself, which is the feature that matters on a
+hotspot serving phones that lock mid-run.
+
+/events replays the tape before subscribing, so a late or reconnecting
+phone sees history rather than a blank screen — read before subscribe, so
+a race yields a duplicate rather than a gap. /tape serves the record
+verbatim, because leg 3 of the argument needs it in the juror's hands."
+```
+
+---
+
 ### Remaining tasks
 
 | Task | Deliverable |
 |---|---|
-| 11 | `broker.py` + `server.py` — routes, SSE fanout, tape replay on connect, `Last-Event-ID` resume |
+| 12 | `verify.py` + `cli.py` — re-derive truth from seed in a fresh process, compare digest, detect tampering |
+| 13 | `preflight.py` — git SHA/dirty, dolfinx detection, LAN IP, QR, disk check, seed-0 self-test |
+| 14 | Frontend (`index.html`, `app.js`, `app.css`) + Playwright smoke at 375 px + `fenicsx`-marked L1 smoke |
 | 12 | `verify.py` + `cli.py` — re-derive truth from seed in a fresh process, compare digest, detect tampering |
 | 13 | `preflight.py` — git SHA/dirty, dolfinx detection, LAN IP, QR, disk check, seed-0 self-test |
 | 14 | Frontend (`index.html`, `app.js`, `app.css`) + Playwright smoke at 375 px + `fenicsx`-marked L1 smoke |
