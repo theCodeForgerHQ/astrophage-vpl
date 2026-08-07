@@ -2357,12 +2357,735 @@ them to stdout would corrupt the stream in a way that reads as a parser bug."
 
 ---
 
+### Task 9: the proof chain, end to end
+
+Tasks 4, 5 and 7 each guard one link. This asserts the whole chain over a **real run**,
+through the real worker subprocess and into a real tape file — which is the only
+configuration that can catch a link that works in isolation and breaks when composed.
+
+**Files:**
+- Create: `packages/vpl-jury/tests/test_proof_chain.py`
+- No production code. If this task requires production changes, something in Tasks 4–8 was
+  wrong, and the fix belongs in that task's file rather than here.
+
+**Interfaces:**
+- Consumes: `worker` as a subprocess, `Tape`, `assert_no_truth_before_reveal`, `SealedTruth`.
+- Produces: nothing importable. This is the gate.
+
+- [ ] **Step 1: Write the test**
+
+Create `packages/vpl-jury/tests/test_proof_chain.py`:
+
+```python
+"""The claim, asserted over a real run: commitment, then estimate, then truth.
+
+Tasks 4, 5 and 7 each guard one link — the allowlist, the emit order, the append-only
+record. A link can be correct alone and wrong composed, so this drives the real worker
+subprocess into a real tape file and asserts the property the demo actually makes.
+
+L0 -> L0 throughout, so this needs no dolfinx and runs in the workspace environment. The
+property under test is about ordering and disclosure, and neither depends on which model
+produced the truth.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from vpl.core.progress import ProgressEvent
+from vpl.jury.events import TRUTH_BEARING_KINDS, TapeEvent, assert_no_truth_before_reveal
+from vpl.jury.tape import Tape
+
+pytestmark = pytest.mark.slow
+
+
+@pytest.fixture(scope="module")
+def recorded(tmp_path_factory: pytest.TempPathFactory) -> list[TapeEvent]:
+    """One real run, driven through the worker and recorded on a tape.
+
+    Module-scoped: the run costs ~19 s and every assertion below reads the same recording,
+    which is also more honest than nine separate runs — they would be nine different
+    truths, and the property is about one.
+    """
+    path = tmp_path_factory.mktemp("tape") / "tape.jsonl"
+    tape = Tape(path)
+    run_id = tape.next_run_id()
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "vpl.jury.worker",
+            json.dumps({"seed": 0, "truth": "L0", "ablate": "oes"}),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=True,
+    )
+    for line in completed.stdout.splitlines():
+        raw = json.loads(line)
+        tape.append(run_id, ProgressEvent(kind=raw["kind"], payload=raw["payload"]))
+
+    return tape.read_all()
+
+
+class TestTheOrdering:
+    def test_the_commitment_is_recorded_before_the_estimate(
+        self, recorded: list[TapeEvent]
+    ) -> None:
+        kinds = [event.kind for event in recorded]
+
+        assert kinds.index("truth_sealed") < kinds.index("estimate_committed")
+
+    def test_the_estimate_is_recorded_before_the_reveal(
+        self, recorded: list[TapeEvent]
+    ) -> None:
+        kinds = [event.kind for event in recorded]
+
+        assert kinds.index("estimate_committed") < kinds.index("seal_opened")
+
+    def test_sequence_numbers_are_strictly_increasing(
+        self, recorded: list[TapeEvent]
+    ) -> None:
+        # The ordering argument rests on these, so a repeat or a gap is not cosmetic.
+        sequences = [event.seq for event in recorded]
+
+        assert sequences == sorted(sequences)
+        assert len(set(sequences)) == len(sequences)
+
+
+class TestTheDisclosure:
+    def test_no_truth_value_appears_before_the_reveal(
+        self, recorded: list[TapeEvent]
+    ) -> None:
+        assert_no_truth_before_reveal(recorded)
+
+    def test_the_raw_tape_text_contains_no_truth_before_the_reveal(
+        self, recorded: list[TapeEvent], tmp_path: Path
+    ) -> None:
+        # Belt and braces, and deliberately crude: the allowlist protects declared keys,
+        # and this catches a truth value smuggled inside an otherwise-permitted field.
+        reveal = next(e for e in recorded if e.kind in TRUTH_BEARING_KINDS)
+        truth = repr(float(reveal.payload["gamma_e_true_w_per_m2"]))  # type: ignore[arg-type]
+
+        earlier = [e for e in recorded if e.seq < reveal.seq]
+
+        for event in earlier:
+            assert truth not in event.to_json()
+
+
+class TestTheCommitmentBinds:
+    def test_the_published_digest_matches_the_revealed_value(
+        self, recorded: list[TapeEvent]
+    ) -> None:
+        # The check a juror does by hand: take the digest that was published before the
+        # estimate existed, take the value revealed afterwards, and confirm they agree.
+        from vpl.validation.sealed import SealedTruth
+
+        published = next(e for e in recorded if e.kind == "truth_sealed")
+        revealed = next(e for e in recorded if e.kind == "seal_opened")
+
+        recomputed = SealedTruth(
+            value=float(revealed.payload["gamma_e_true_w_per_m2"]),  # type: ignore[arg-type]
+            name="Gamma_E",
+        ).commitment()
+
+        assert recomputed == published.payload["commitment"]
+
+    def test_the_run_reported_its_own_verification(
+        self, recorded: list[TapeEvent]
+    ) -> None:
+        revealed = next(e for e in recorded if e.kind == "seal_opened")
+
+        assert revealed.payload["commitment_verified"] is True
+
+
+class TestDeterminism:
+    def test_the_same_seed_reproduces_the_same_truth(self) -> None:
+        # What a juror is invited to test by re-running their own seed. If this fails, the
+        # interface's re-run affordance is a liability rather than evidence.
+        def truth_of(seed: int) -> float:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "vpl.jury.worker",
+                    json.dumps({"seed": seed, "truth": "L0", "ablate": "oes"}),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=True,
+            )
+            for line in completed.stdout.splitlines():
+                raw = json.loads(line)
+                if raw["kind"] == "seal_opened":
+                    return float(raw["payload"]["gamma_e_true_w_per_m2"])
+            raise AssertionError("the run never revealed a truth")
+
+        assert truth_of(0) == truth_of(0)
+```
+
+- [ ] **Step 2: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_proof_chain.py -v`
+Expected: 9 passed. Costs ~60 s — one module-scoped run plus two in the determinism case.
+
+- [ ] **Step 3: Verify lint and types**
+
+Run:
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+```
+Expected: clean.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/vpl-jury/tests/test_proof_chain.py
+git commit -m "test(jury): the proof chain, asserted over a real run
+
+Tasks 4, 5 and 7 each guard one link. This drives the real worker
+subprocess into a real tape and asserts the composed property: commitment
+before estimate before reveal, no truth value on the wire beforehand, the
+published digest matching the revealed value, and the same seed
+reproducing the same truth.
+
+The raw-text check is deliberately crude. The allowlist protects declared
+keys; this catches a truth smuggled inside a permitted one."
+```
+
+---
+
+### Task 10: `queue.py` — one worker, strict FIFO
+
+**Files:**
+- Create: `packages/vpl-jury/src/vpl/jury/queue.py`
+- Test: `packages/vpl-jury/tests/test_queue.py`
+
+**Interfaces:**
+- Consumes: `RunRequest`, `Tape`, `ProgressEvent`.
+- Produces:
+  - `QueueFullError(RuntimeError)`.
+  - `Submission` — frozen slots dataclass: `run_id: str`, `position: int`, `deduplicated: bool`.
+  - `RunQueue(tape, *, publish, max_pending=MAX_PENDING, timeout_s=RUN_TIMEOUT_S, command=worker_command)`.
+    - `publish: Callable[[TapeEvent], None]` — called for every recorded event.
+    - `command: Callable[[RunRequest], Sequence[str]]` — injectable so tests need no real inversion.
+  - `RunQueue.submit(self, request) -> Submission` — sync, returns immediately.
+  - `RunQueue.run_forever(self) -> None` — async; drains the queue until stopped.
+  - `RunQueue.stop(self) -> None` — async; cancels the in-flight subprocess and returns.
+  - `MAX_PENDING: int = 20`, `RUN_TIMEOUT_S: float = 180.0`.
+  - `worker_command(request) -> list[str]`.
+
+**Why `command` is injectable:** a hermetic queue test must not cost 19 s per case. Tests
+pass a command that emits canned NDJSON in milliseconds, so FIFO order, the cap, dedupe and
+the timeout are each tested in isolation from the physics.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_queue.py`:
+
+```python
+"""One worker, strict FIFO, and the three refusals.
+
+The `command` seam is what makes this hermetic: a real inversion is ~19 s and none of the
+properties here are about the inversion. They are about ordering, admission control and what
+happens when a subprocess misbehaves, so the subprocess is a two-line script.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from vpl.jury.events import TapeEvent
+from vpl.jury.queue import QueueFullError, RunQueue
+from vpl.jury.request import RunRequest
+from vpl.jury.tape import Tape
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+def _emits(*kinds: str) -> list[str]:
+    """A command that prints one event per kind and exits cleanly."""
+    lines = "".join(
+        f"print({json.dumps(json.dumps({'kind': kind, 'payload': {}}))});" for kind in kinds
+    )
+    return [sys.executable, "-c", lines]
+
+
+def _hangs() -> list[str]:
+    return [sys.executable, "-c", "import time; time.sleep(600)"]
+
+
+def _crashes() -> list[str]:
+    return [sys.executable, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"]
+
+
+def _queue(
+    tmp_path: Path,
+    command: object,
+    *,
+    max_pending: int = 20,
+    timeout_s: float = 30.0,
+) -> tuple[RunQueue, list[TapeEvent]]:
+    published: list[TapeEvent] = []
+    queue = RunQueue(
+        Tape(tmp_path / "tape.jsonl"),
+        publish=published.append,
+        max_pending=max_pending,
+        timeout_s=timeout_s,
+        command=command,  # type: ignore[arg-type]
+    )
+    return queue, published
+
+
+def _request(seed: int) -> RunRequest:
+    return RunRequest.parse({"seed": seed, "truth": "L0", "ablate": "oes"})
+
+
+async def _drain(queue: RunQueue) -> None:
+    """Run the worker loop until the queue empties, then stop it."""
+    task = asyncio.create_task(queue.run_forever())
+    await queue.wait_until_idle()
+    await queue.stop()
+    await task
+
+
+class TestSubmission:
+    async def test_the_first_submission_is_at_position_one(self, tmp_path: Path) -> None:
+        queue, _ = _queue(tmp_path, _emits("reference_solved"))
+
+        submission = queue.submit(_request(0))
+
+        assert submission.position == 1
+        assert submission.run_id == "r-0001"
+
+    async def test_positions_increase_with_the_backlog(self, tmp_path: Path) -> None:
+        queue, _ = _queue(tmp_path, _emits("reference_solved"))
+
+        queue.submit(_request(0))
+        second = queue.submit(_request(1))
+
+        assert second.position == 2
+
+    async def test_a_duplicate_pending_request_returns_the_existing_run(
+        self, tmp_path: Path
+    ) -> None:
+        # Two jurors typing the same seed should watch one run. At 30 s each, queueing both
+        # is the difference between a responsive demo and a stalled one.
+        queue, _ = _queue(tmp_path, _emits("reference_solved"))
+
+        first = queue.submit(_request(7))
+        again = queue.submit(_request(7))
+
+        assert again.run_id == first.run_id
+        assert again.deduplicated is True
+
+    def test_the_cap_is_enforced(self, tmp_path: Path) -> None:
+        queue, _ = _queue(tmp_path, _emits("reference_solved"), max_pending=2)
+
+        queue.submit(_request(0))
+        queue.submit(_request(1))
+
+        with pytest.raises(QueueFullError, match="2"):
+            queue.submit(_request(2))
+
+
+class TestExecution:
+    async def test_events_reach_the_tape_and_the_subscribers(self, tmp_path: Path) -> None:
+        queue, published = _queue(tmp_path, _emits("truth_sealed", "seal_opened"))
+        queue.submit(_request(0))
+
+        await _drain(queue)
+
+        assert [event.kind for event in published] == ["truth_sealed", "seal_opened"]
+        assert [event.kind for event in queue.tape.read_all()] == [
+            "truth_sealed",
+            "seal_opened",
+        ]
+
+    async def test_runs_execute_in_submission_order(self, tmp_path: Path) -> None:
+        queue, published = _queue(tmp_path, _emits("reference_solved"))
+        first = queue.submit(_request(0))
+        second = queue.submit(_request(1))
+
+        await _drain(queue)
+
+        assert [event.run_id for event in published] == [first.run_id, second.run_id]
+
+    async def test_a_completed_run_frees_its_fingerprint_for_a_rerun(
+        self, tmp_path: Path
+    ) -> None:
+        # Dedupe covers *pending* duplicates only. Re-running a finished seed is an
+        # explicit affordance: it demonstrates determinism.
+        queue, _ = _queue(tmp_path, _emits("reference_solved"))
+        first = queue.submit(_request(7))
+        await _drain(queue)
+
+        again = queue.submit(_request(7))
+
+        assert again.run_id != first.run_id
+        assert again.deduplicated is False
+
+
+class TestFailureIsRecorded:
+    async def test_a_crash_is_recorded_rather_than_swallowed(self, tmp_path: Path) -> None:
+        queue, published = _queue(tmp_path, _crashes())
+        queue.submit(_request(0))
+
+        await _drain(queue)
+
+        kinds = [event.kind for event in published]
+        assert "run_failed" in kinds
+        failure = next(e for e in published if e.kind == "run_failed")
+        assert failure.payload["exit_code"] == 3
+
+    async def test_the_stderr_tail_is_carried_so_the_reason_is_visible(
+        self, tmp_path: Path
+    ) -> None:
+        queue, published = _queue(tmp_path, _crashes())
+        queue.submit(_request(0))
+
+        await _drain(queue)
+
+        failure = next(e for e in published if e.kind == "run_failed")
+        assert "boom" in str(failure.payload["stderr_tail"])
+
+    async def test_an_overrunning_run_is_killed_and_recorded(self, tmp_path: Path) -> None:
+        queue, published = _queue(tmp_path, _hangs(), timeout_s=0.5)
+        queue.submit(_request(0))
+
+        await _drain(queue)
+
+        assert "run_timeout" in [event.kind for event in published]
+
+    async def test_a_failure_does_not_stop_the_queue(self, tmp_path: Path) -> None:
+        # One bad run must not end the session.
+        queue, published = _queue(tmp_path, _crashes())
+        queue.submit(_request(0))
+        queue.submit(_request(1))
+
+        await _drain(queue)
+
+        assert len([e for e in published if e.kind == "run_failed"]) == 2
+```
+
+Add `anyio` to the test dependency group in the root `pyproject.toml` `[dependency-groups] dev` list:
+
+```toml
+    "anyio>=4.6",
+```
+
+> `anyio`'s pytest plugin is used rather than `pytest-asyncio` because Starlette already
+> depends on `anyio`, so this adds no new runtime tree — and `filterwarnings = ["error"]`
+> makes `pytest-asyncio`'s default-loop-scope deprecation warning a hard failure on the
+> version currently on conda-forge.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_queue.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'vpl.jury.queue'`
+
+- [ ] **Step 3: Write the implementation**
+
+Create `packages/vpl-jury/src/vpl/jury/queue.py`:
+
+```python
+"""One worker, strict FIFO, and admission control.
+
+## Why exactly one worker
+
+A reference inversion saturates most of the machine — the measured four-channel run takes
+54 s at ~250 % CPU. Two concurrent runs do not halve the wait; they make both slower and
+make the queue position meaningless. One worker with a visible position is honest about the
+resource and, more usefully, means every juror is watching the same run at the same moment.
+That shared view is itself part of the argument: nobody can be shown a private result.
+
+## Why a fingerprint dedupe, and only while pending
+
+Two jurors typing the same seed while it is queued should watch one run. Re-running a seed
+that has already *finished* is different: it is an explicit demonstration that the same
+input gives the same answer, so a completed fingerprint is released.
+
+## Why failures are events
+
+A crashed or overrunning run is recorded on the tape like anything else. The alternative is
+a run that vanishes, which in a demo about not hiding things is the worst available
+behaviour.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Final
+
+from vpl.core.progress import ProgressEvent
+from vpl.jury.events import TapeEvent
+from vpl.jury.request import RunRequest
+from vpl.jury.tape import Tape, TapeWriteError
+
+__all__ = [
+    "MAX_PENDING",
+    "RUN_TIMEOUT_S",
+    "QueueFullError",
+    "RunQueue",
+    "Submission",
+    "worker_command",
+]
+
+#: Pending runs admitted before the queue refuses. Twenty is about ten minutes of backlog
+#: at the reference cost, which is longer than any judging slot — so hitting it means
+#: something is wrong, not that the jury is enthusiastic.
+MAX_PENDING: Final[int] = 20
+
+#: Wall-clock ceiling on one run. The measured worst case is the 54 s four-channel
+#: inversion, so this is a wide margin that still bounds a hang.
+RUN_TIMEOUT_S: Final[float] = 180.0
+
+#: How much of a failed run's stderr to carry onto the tape.
+_STDERR_TAIL_CHARS: Final[int] = 2000
+
+#: Grace period between SIGTERM and SIGKILL.
+_KILL_GRACE_S: Final[float] = 2.0
+
+
+class QueueFullError(RuntimeError):
+    """The backlog is at :data:`MAX_PENDING`."""
+
+
+@dataclass(frozen=True, slots=True)
+class Submission:
+    """What a phone gets back immediately."""
+
+    run_id: str
+    position: int
+    deduplicated: bool
+
+
+def worker_command(request: RunRequest) -> list[str]:
+    """The real worker invocation.
+
+    `sys.executable` rather than a named environment: the server already runs in the
+    environment that has dolfinx, and hard-coding a name would break the moment somebody
+    renames it.
+    """
+    import sys
+
+    return [sys.executable, "-m", "vpl.jury.worker", json.dumps(_as_json(request))]
+
+
+def _as_json(request: RunRequest) -> dict[str, object]:
+    return {"seed": request.seed, "truth": request.truth, "ablate": request.ablate}
+
+
+class RunQueue:
+    """A FIFO of pending runs, drained one at a time."""
+
+    def __init__(
+        self,
+        tape: Tape,
+        *,
+        publish: Callable[[TapeEvent], None],
+        max_pending: int = MAX_PENDING,
+        timeout_s: float = RUN_TIMEOUT_S,
+        command: Callable[[RunRequest], Sequence[str]] = worker_command,
+    ) -> None:
+        self.tape = tape
+        self._publish = publish
+        self._max_pending = max_pending
+        self._timeout_s = timeout_s
+        self._command = command
+        self._pending: list[tuple[str, RunRequest]] = []
+        self._fingerprints: dict[str, str] = {}
+        self._arrived = asyncio.Event()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._stopping = False
+        self._process: asyncio.subprocess.Process | None = None
+
+    def submit(self, request: RunRequest) -> Submission:
+        """Admit a request, or refuse it.
+
+        Synchronous: a phone gets its run id and queue position before any work starts.
+
+        Raises:
+            QueueFullError: The backlog is at the cap.
+        """
+        fingerprint = request.fingerprint()
+        existing = self._fingerprints.get(fingerprint)
+        if existing is not None:
+            position = next(
+                (index + 1 for index, (rid, _) in enumerate(self._pending) if rid == existing),
+                0,
+            )
+            return Submission(run_id=existing, position=position, deduplicated=True)
+
+        if len(self._pending) >= self._max_pending:
+            raise QueueFullError(
+                f"queue is full at {self._max_pending} pending runs. "
+                f"Wait for one to finish and try again."
+            )
+
+        run_id = self.tape.next_run_id()
+        self._pending.append((run_id, request))
+        self._fingerprints[fingerprint] = run_id
+        self._idle.clear()
+        self._arrived.set()
+        return Submission(run_id=run_id, position=len(self._pending), deduplicated=False)
+
+    async def wait_until_idle(self) -> None:
+        """Block until the backlog is empty and nothing is in flight."""
+        await self._idle.wait()
+
+    async def stop(self) -> None:
+        """Stop draining and kill anything in flight."""
+        self._stopping = True
+        self._arrived.set()
+        if self._process is not None and self._process.returncode is None:
+            await self._terminate(self._process)
+
+    async def run_forever(self) -> None:
+        """Drain the queue until :meth:`stop`."""
+        while not self._stopping:
+            if not self._pending:
+                self._idle.set()
+                self._arrived.clear()
+                await self._arrived.wait()
+                continue
+            run_id, request = self._pending.pop(0)
+            try:
+                await self._execute(run_id, request)
+            finally:
+                self._fingerprints.pop(request.fingerprint(), None)
+        self._idle.set()
+
+    async def _execute(self, run_id: str, request: RunRequest) -> None:
+        process = await asyncio.create_subprocess_exec(
+            *self._command(request),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        self._process = process
+        assert process.stdout is not None
+        try:
+            await asyncio.wait_for(
+                self._pump(run_id, process.stdout), timeout=self._timeout_s
+            )
+            await asyncio.wait_for(process.wait(), timeout=self._timeout_s)
+        except TimeoutError:
+            await self._terminate(process)
+            self._record(run_id, "run_timeout", timeout_s=self._timeout_s)
+            return
+        finally:
+            self._process = None
+
+        if process.returncode:
+            stderr = await process.stderr.read() if process.stderr is not None else b""
+            self._record(
+                run_id,
+                "run_failed",
+                exit_code=process.returncode,
+                stderr_tail=stderr.decode("utf-8", "replace")[-_STDERR_TAIL_CHARS:],
+            )
+
+    async def _pump(self, run_id: str, stdout: asyncio.StreamReader) -> None:
+        """Relay the worker's NDJSON onto the tape, line by line, as it arrives."""
+        while True:
+            line = await stdout.readline()
+            if not line:
+                return
+            text = line.decode("utf-8", "replace").strip()
+            if not text:
+                continue
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError:
+                # The worker guards stdout purity; if a line still arrives malformed it is
+                # a defect, and dropping it silently would hide it. Recorded as a failure.
+                self._record(run_id, "run_failed", exit_code=0, stderr_tail=text[:_STDERR_TAIL_CHARS])
+                continue
+            self._record(run_id, str(raw["kind"]), **dict(raw.get("payload", {})))
+
+    def _record(self, run_id: str, kind: str, **payload: object) -> None:
+        try:
+            stamped = self.tape.append(
+                run_id, ProgressEvent(kind=kind, payload=payload)  # type: ignore[arg-type]
+            )
+        except TapeWriteError:
+            # The tape is the audit trail; if it cannot be written the run is not
+            # verifiable and the failure must surface rather than be papered over.
+            raise
+        self._publish(stamped)
+
+    @staticmethod
+    async def _terminate(process: asyncio.subprocess.Process) -> None:
+        """SIGTERM, then SIGKILL if it will not go."""
+        with contextlib.suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_KILL_GRACE_S)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+```
+
+- [ ] **Step 4: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_queue.py -v`
+Expected: 13 passed, in a few seconds — no real inversion runs here.
+
+- [ ] **Step 5: Verify lint and types**
+
+Run:
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+```
+Expected: clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/vpl-jury pyproject.toml uv.lock
+git commit -m "feat(jury): the FIFO queue, with one worker and visible position
+
+One worker because a reference inversion saturates the machine: two
+concurrent runs do not halve the wait, they make both slower and make the
+position meaningless. The shared single view is also part of the argument
+— nobody can be shown a private result.
+
+Pending duplicates dedupe; a *completed* fingerprint is released, because
+re-running a finished seed is an explicit demonstration of determinism.
+Crashes and timeouts are recorded as events: a run that vanishes is the
+worst available behaviour in a demo about not hiding things."
+```
+
+---
+
 ### Remaining tasks
 
 | Task | Deliverable |
 |---|---|
-| 9 | End-to-end proof chain over a real L0/T1 run through worker + tape: ordering, commitment-before-estimate, no leak, digest re-verified |
-| 10 | `queue.py` — FIFO, cap → 429, pending dedupe, timeout with SIGTERM→SIGKILL, cancellation |
 | 11 | `broker.py` + `server.py` — routes, SSE fanout, tape replay on connect, `Last-Event-ID` resume |
 | 12 | `verify.py` + `cli.py` — re-derive truth from seed in a fresh process, compare digest, detect tampering |
 | 13 | `preflight.py` — git SHA/dirty, dolfinx detection, LAN IP, QR, disk check, seed-0 self-test |
