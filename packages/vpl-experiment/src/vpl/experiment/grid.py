@@ -298,6 +298,13 @@ class CellReport:
     discrepancy_channels: tuple[str, ...] = ()
     #: The channel dropped from the likelihood, or ``None`` for the full set.
     ablated: str | None = None
+    #: The likelihood weight actually applied to each contributing channel, positionally
+    #: aligned with :attr:`contributing`. All ``1.0`` for an unweighted run. Carried for the
+    #: same reason :attr:`ablated` is: a down-weighted run and an unweighted one differ by
+    #: nothing visible in the numbers themselves, so without this a weighted result and a
+    #: baseline result are indistinguishable after the fact — and the whole point of the
+    #: weighting is to be auditable rather than trusted.
+    channel_weights: tuple[float, ...] = ()
 
     @property
     def label(self) -> str:
@@ -535,6 +542,7 @@ def run_cell(
     l2_truth_path: Path | str | None = None,
     discrepancy_path: Path | str | None = None,
     ablate: str | None = None,
+    channel_weights: dict[str, float] | None = None,
     registry: ParameterRegistry | None = None,
     credible_level: float = CREDIBLE_LEVEL,
     verbose: bool = False,
@@ -558,6 +566,22 @@ def run_cell(
             :meth:`~vpl.inverse.fusion.JointLikelihood.without`), because a typo would
             ablate nothing and produce two identical rows that read as "this channel
             carries no information" — the exact opposite of the truth.
+        channel_weights: Per-channel likelihood weights, applied after ``ablate``. ``None``
+            leaves every weight at 1.0, which is bit-for-bit the unweighted behaviour, so
+            every number measured before weights existed stays comparable with every number
+            measured after.
+
+            This is the port for an error-budget audit's output. The measured failure at T2
+            is that each channel understates its own uncertainty and fusion compounds the
+            understatement ~50-fold, so the posterior narrows and stops covering the truth.
+            Passing ``w = 1 / (understatement factor)**2`` inflates that channel's effective
+            variance back to what it should have claimed — the power likelihood, exact
+            algebra for a Gaussian rather than a fudge. See
+            :class:`~vpl.inverse.fusion.JointLikelihood` for the derivation and its
+            limitations.
+
+            Applied *after* ablation, so weighting a channel that was just ablated raises
+            rather than silently doing nothing.
         credible_level: Central mass of the reported interval.
 
     Raises:
@@ -614,6 +638,8 @@ def run_cell(
     joint: JointLikelihood = channel_set.joint(channel_set.observe(truth_state))
     if ablate is not None:
         joint = joint.without(ablate)
+    if channel_weights:
+        joint = joint.with_weights(channel_weights)
 
     # ── step 3: seal the truth ────────────────────────────────────────────────
     sealed = SealedTruth(value=gamma_e_true, name="Gamma_E")
@@ -673,6 +699,7 @@ def run_cell(
         tier=sealed.tier,
         contributing=detail.contributing,
         excluded=detail.excluded,
+        channel_weights=detail.weights,
         gamma_e_true_w_per_m2=float(sealed.value),
         gamma_e_estimate_w_per_m2=float(sealed.estimate),
         relative_error=sealed.relative_error,
