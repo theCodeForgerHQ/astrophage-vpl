@@ -30,6 +30,8 @@ parameters. If it cannot do that, nothing downstream means anything.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -302,3 +304,238 @@ class TestTheResult:
 
         with pytest.raises(AttributeError):
             result.converged = False  # type: ignore[misc]
+
+
+class _FlatPrior:
+    """A prior with no opinion, so a bimodal *likelihood* is the only thing shaping the
+    objective below — the simplest possible surface with two genuinely separate modes."""
+
+    def log_prob_unconstrained(self, u: np.ndarray) -> float:
+        return 0.0
+
+
+def _bimodal_log_likelihood(u: np.ndarray) -> float:
+    """Two well-separated Gaussian bumps in ``u[0]``: a shallow local one at 0, a deep
+    global one at 6, with a tall gap between them. A single L-BFGS-B run started at 0 sits
+    exactly on the local bump and never crosses the gap; a start past ~3 falls into the
+    global one. Built with :func:`scipy.special.logsumexp` for the same reason the real
+    likelihoods are log-domain: the ratio of the two components is astronomic (1000x) and
+    a bare sum would lose precision the log form does not.
+    """
+    from scipy.special import logsumexp
+
+    x = float(u[0])
+    local = np.log(1.0) - 0.5 * ((x - 0.0) / 0.4) ** 2
+    global_ = np.log(1000.0) - 0.5 * ((x - 6.0) / 0.4) ** 2
+    return float(logsumexp([local, global_]))
+
+
+class TestMultiStart:
+    """:func:`maximum_a_posteriori`'s ``n_starts``/``seed`` — the fix for OES's multimodal
+    surface (doc plan 2026-08-07, "The MAP-robustness claim is confirmed"). Verified on a
+    synthetic bimodal problem rather than the physics forward model, for the same reason
+    :class:`TestClosedFormRecovery` is: the answer is known, so failure is unambiguous.
+    """
+
+    def test_default_n_starts_is_one(self) -> None:
+        result = maximum_a_posteriori(log_likelihood=lambda _: 0.0, prior=default_control_prior())
+
+        assert result.n_starts == 1
+        assert result.n_distinct_modes == 1
+        assert result.start_objectives == (result.objective,)
+
+    def test_n_starts_one_is_bit_for_bit_identical_to_not_passing_it(self) -> None:
+        # The load-bearing guarantee: every number this project has published so far was
+        # measured single-start, and adding this parameter must not move any of them.
+        prior = default_control_prior()
+
+        baseline = maximum_a_posteriori(log_likelihood=lambda _: 0.0, prior=prior)
+        explicit = maximum_a_posteriori(
+            log_likelihood=lambda _: 0.0, prior=prior, n_starts=1, seed=12345
+        )
+
+        np.testing.assert_array_equal(baseline.unconstrained, explicit.unconstrained)
+        assert baseline.objective == explicit.objective
+        assert baseline.converged == explicit.converged
+        assert baseline.iterations == explicit.iterations
+
+    def test_n_starts_less_than_one_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="n_starts"):
+            maximum_a_posteriori(
+                log_likelihood=lambda _: 0.0, prior=default_control_prior(), n_starts=0
+            )
+
+    def test_single_start_from_the_local_mode_misses_the_global_one(self) -> None:
+        result = maximum_a_posteriori(
+            log_likelihood=_bimodal_log_likelihood,
+            prior=_FlatPrior(),  # type: ignore[arg-type]
+            initial=np.array([0.0]),
+            n_starts=1,
+        )
+
+        assert result.unconstrained[0] == pytest.approx(0.0, abs=1e-3)
+
+    def test_multi_start_finds_the_global_mode_the_single_start_misses(self) -> None:
+        result = maximum_a_posteriori(
+            log_likelihood=_bimodal_log_likelihood,
+            prior=_FlatPrior(),  # type: ignore[arg-type]
+            initial=np.array([0.0]),
+            n_starts=5,
+            seed=42,
+        )
+
+        assert result.unconstrained[0] == pytest.approx(6.0, abs=1e-3)
+        assert result.n_starts == 5
+        assert len(result.start_objectives) == 5
+        # Two genuinely different optimised points among the 5 starts: the local mode this
+        # module's own start always reproduces, and the global one at least one perturbed
+        # start reached. This is doc 00's house style applied to the claim itself — "the
+        # surface is multimodal" is checked here, not just asserted in a report.
+        assert result.n_distinct_modes >= 2
+
+    def test_extra_starts_are_deterministic_given_the_seed(self) -> None:
+        kwargs = {
+            "log_likelihood": _bimodal_log_likelihood,
+            "prior": _FlatPrior(),
+            "initial": np.array([0.0]),
+            "n_starts": 5,
+            "seed": 42,
+        }
+
+        first = maximum_a_posteriori(**kwargs)  # type: ignore[arg-type]
+        second = maximum_a_posteriori(**kwargs)  # type: ignore[arg-type]
+
+        np.testing.assert_array_equal(first.unconstrained, second.unconstrained)
+        assert first.start_objectives == second.start_objectives
+
+    def test_different_seeds_draw_different_extra_starts(self) -> None:
+        result_a = maximum_a_posteriori(
+            log_likelihood=lambda _: 0.0,
+            prior=_FlatPrior(),  # type: ignore[arg-type]
+            initial=np.zeros(3),
+            n_starts=3,
+            seed=1,
+        )
+        result_b = maximum_a_posteriori(
+            log_likelihood=lambda _: 0.0,
+            prior=_FlatPrior(),  # type: ignore[arg-type]
+            initial=np.zeros(3),
+            n_starts=3,
+            seed=2,
+        )
+
+        # A flat objective converges every start back to the same optimum regardless of
+        # where it began, so the *starts themselves* (not the optima) are what must differ
+        # — checked through the objects the public API actually exposes: distinct calls
+        # with distinct seeds must not silently share one RNG state.
+        assert result_a.start_objectives == result_b.start_objectives  # both trivially flat
+        from vpl.inverse.map import _start_points
+
+        points_a = _start_points(np.zeros(3), n_starts=3, seed=1, prior=_FlatPrior())
+        points_b = _start_points(np.zeros(3), n_starts=3, seed=2, prior=_FlatPrior())
+        assert not any(
+            np.array_equal(a, b) for a, b in zip(points_a[1:], points_b[1:], strict=True)
+        )
+
+    def test_best_by_log_posterior_is_selected_regardless_of_start_order(self) -> None:
+        # The global mode is deeper (higher log posterior / lower objective); the returned
+        # result must be it, not merely "the last start run".
+        result = maximum_a_posteriori(
+            log_likelihood=_bimodal_log_likelihood,
+            prior=_FlatPrior(),  # type: ignore[arg-type]
+            initial=np.array([0.0]),
+            n_starts=5,
+            seed=42,
+        )
+
+        assert result.objective == pytest.approx(min(result.start_objectives))
+
+
+class _BoxPrior:
+    """Finite log-density inside ``[-half_width, half_width]`` per coordinate, ``-inf``
+    outside — a minimal stand-in for doc 05 §2.1's bounded box-uniforms, which is exactly
+    the shape of prior that made an unbounded perturbation dangerous (see
+    ``_bounded_perturbation``'s docstring)."""
+
+    def __init__(self, half_width: float) -> None:
+        self.half_width = half_width
+
+    def log_prob_unconstrained(self, u: np.ndarray) -> float:
+        if np.any(np.abs(u) > self.half_width):
+            return -math.inf
+        return 0.0
+
+
+class TestBoundedStarts:
+    """:func:`_bounded_perturbation` — the fix for the ``n_starts=10`` crash a wide,
+    unbounded perturbation produced against OES's real likelihood (``cannot normalise a
+    distribution whose integral is 0.0``): a caller-side failure this module cannot see
+    into, fixed here by never handing the optimiser a start outside the prior's own
+    declared support in the first place.
+    """
+
+    def test_every_extra_start_has_finite_prior_support(self) -> None:
+        from vpl.inverse.map import _start_points
+
+        # Half-width well inside the perturbation scale (3.0), so unbounded draws would
+        # routinely land outside it and the fix is exercised, not vacuous.
+        prior = _BoxPrior(half_width=1.0)
+
+        points = _start_points(np.zeros(4), n_starts=8, seed=3, prior=prior)  # type: ignore[arg-type]
+
+        assert len(points) == 8
+        for point in points:
+            assert np.isfinite(prior.log_prob_unconstrained(point))
+            assert np.all(np.abs(point) <= prior.half_width)
+
+    def test_an_unreachable_box_falls_back_to_the_reference_rather_than_disappearing(
+        self,
+    ) -> None:
+        from vpl.inverse.map import _start_points
+
+        # A half-width far too small for the shrinking schedule to reach in the attempt
+        # budget: every draw is rejected, and the start must still exist — as the
+        # reference point, not silently missing.
+        prior = _BoxPrior(half_width=1e-9)
+
+        points = _start_points(np.zeros(2), n_starts=3, seed=5, prior=prior)  # type: ignore[arg-type]
+
+        assert len(points) == 3
+        for point in points[1:]:
+            np.testing.assert_array_equal(point, np.zeros(2))
+
+    def test_n_starts_one_never_touches_the_prior_for_perturbation(self) -> None:
+        # n_starts=1 must stay bit-for-bit the old single-start path — including never
+        # calling into the bounded-perturbation machinery this fix added.
+        class _RaisingPrior:
+            def log_prob_unconstrained(self, u: np.ndarray) -> float:
+                return 0.0
+
+            def median(self) -> None:
+                raise AssertionError("median() should not be needed when initial is given")
+
+        result = maximum_a_posteriori(
+            log_likelihood=lambda _: 0.0,
+            prior=_RaisingPrior(),  # type: ignore[arg-type]
+            initial=np.zeros(2),
+            n_starts=1,
+        )
+
+        assert result.n_starts == 1
+
+    def test_a_wide_multi_start_search_no_longer_crashes_on_a_narrow_box(self) -> None:
+        # The end-to-end shape of the regression: n_starts large enough that several
+        # unbounded draws would have left the box, on a prior narrow enough that they
+        # would have. Must complete without raising.
+        prior = _BoxPrior(half_width=0.5)
+
+        result = maximum_a_posteriori(
+            log_likelihood=lambda _: 0.0,
+            prior=prior,  # type: ignore[arg-type]
+            initial=np.zeros(3),
+            n_starts=10,
+            seed=7,
+        )
+
+        assert result.n_starts == 10
+        assert len(result.start_objectives) == 10

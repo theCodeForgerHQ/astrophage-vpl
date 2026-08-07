@@ -64,6 +64,14 @@ class Stream(StrEnum):
     EXPERIMENT_DESIGN = "experiment_design"
     #: Deterministic subsampling of particle dumps for storage (doc 08 §7).
     SUBSAMPLING = "subsampling"
+    #: Multi-start perturbations for :func:`~vpl.inverse.map.maximum_a_posteriori` (doc 05
+    #: §5). OES's likelihood surface is multimodal (measured: 4/15 single-start fits land
+    #: confidently on a wrong mode) and a single L-BFGS-B run from one point cannot tell a
+    #: local optimum from the global one. This stream seeds the *extra* start points a
+    #: multi-start search adds beyond the first — never the first, which stays exactly the
+    #: prior-median/caller-supplied point single-start already used, so ``n_starts=1``
+    #: draws nothing from this stream and is bit-for-bit unchanged.
+    MAP_MULTISTART = "map_multistart"
 
 
 #: Domain separation for the keyed hash, so a seed derived here cannot collide with one

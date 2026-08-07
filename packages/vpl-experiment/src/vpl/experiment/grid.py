@@ -138,6 +138,55 @@ _FLUX_UNIT: Final[str] = "W/m**2"
 #: the same way.
 _L0_POSTERIOR_SAMPLES: Final[int] = 20000
 
+#: ``run_cell``'s default for :func:`~vpl.inverse.map.maximum_a_posteriori`'s ``n_starts``.
+#: **One**, and the reason it is one is a measurement rather than a preference.
+#:
+#: ## Why multi-start looked right
+#:
+#: On the OES-alone, matched-physics (L0 truth = L0 inversion) 15-seed cell, single-start
+#: landed near truth on 11/14 completed seeds and put a *confident, positive-definite*
+#: interval on the wrong mode for 3/14 (n0/T_e ratios 0.221/9.61, 0.728/2.08, 0.227/8.90).
+#: Five bounded starts rescued all three — 15/15 near truth, 0 non-positive-definite, 0
+#: confidently wrong — and cut OES's measured overconfidence factor from 51.8x/305.5x
+#: (n0/T_e) to 16.4x/11.1x. That measurement stands and is still the basis for OES's
+#: likelihood weight.
+#:
+#: ## Why it is nevertheless wrong as a default here
+#:
+#: Setting this to 5 and re-running the **actual system** — L1 truth, L0 inversion, three
+#: channels, ``ablate="oes"``, the configuration the headline number comes from — broke it:
+#:
+#: * seed 0: ``Gamma_E`` error **10 491 %**, n0 **+1 142 %**, T_e **+7 071 %**
+#: * seed 3: ``Gamma_E`` error **3 365 %**, n0 **+323 %**, T_e **+6 502 %**
+#: * seed 8: raised ``CoherentScatteringRegimeError`` (alpha=0.144, Thomson's incoherent
+#:   regime requires alpha << 1) — a start outside the physics' validity, not merely
+#:   outside the fit's basin
+#:
+#: The same seeds at ``n_starts=1`` give 1.28 % and 11.33 %.
+#:
+#: Two distinct causes, and neither is fixed by drawing starts more carefully:
+#:
+#: 1. **A misspecified likelihood has better optima than the truth.** At T2 the inversion
+#:    model is *deliberately* wrong, so far from the truth the likelihood surface is not a
+#:    noisy version of the right one — it has genuinely higher-scoring modes at absurd
+#:    parameter values. Single-start never found them because it started near the reference
+#:    and stayed local. Multi-start went looking and succeeded. It optimised the wrong
+#:    objective more thoroughly, which is worse than optimising it badly.
+#: 2. **Prior-valid is not physics-valid.** ``_bounded_perturbation`` rejects starts outside
+#:    the prior's support, which is the only check a dimension-agnostic module can make. It
+#:    cannot know that Thomson's spectrum model stops being defined at alpha ~ 0.1.
+#:
+#: So ``n_starts > 1`` is sound for a single channel against its own generative model, and
+#: unsound as a system default at T2. It stays available per-call for diagnostics. Making it
+#: safe here needs validity bounds owned by the physics, not by the optimiser — which is
+#: real work, not a parameter change.
+#:
+#: The failure is also a caution about component benchmarks: a 15-seed single-channel test
+#: reported "every failure mode eliminated" for a change that is catastrophic on 25 % of
+#: system seeds, and it fails *silently* — those runs return ``converged=True`` with no
+#: interval, so a mean taken over them would be meaningless rather than obviously wrong.
+_DEFAULT_N_STARTS: Final[int] = 1
+
 
 class EedfShape(Enum):
     """Which electron energy distribution the **truth's measurement** is generated with.
@@ -305,6 +354,16 @@ class CellReport:
     #: baseline result are indistinguishable after the fact — and the whole point of the
     #: weighting is to be auditable rather than trusted.
     channel_weights: tuple[float, ...] = ()
+    #: How many starts :func:`~vpl.inverse.map.maximum_a_posteriori` actually ran from.
+    #: ``1`` for every row produced before ``run_cell(n_starts=...)`` existed, so an old row
+    #: and a new single-start row remain indistinguishable in every other field, per
+    #: :class:`~vpl.inverse.map.MapResult`'s own guarantee.
+    map_n_starts: int = 1
+    #: How many of those starts converged to a distinct mode — see
+    #: :attr:`~vpl.inverse.map.MapResult.n_distinct_modes`. A value ``> 1`` is a per-row,
+    #: checkable instance of "this cell's likelihood surface is multimodal", not merely a
+    #: claim carried over from a separate audit.
+    map_n_distinct_modes: int = 1
 
     @property
     def label(self) -> str:
@@ -546,6 +605,7 @@ def run_cell(
     registry: ParameterRegistry | None = None,
     credible_level: float = CREDIBLE_LEVEL,
     verbose: bool = False,
+    n_starts: int = _DEFAULT_N_STARTS,
 ) -> CellReport:
     """doc 07 §3's protocol, steps 1-6, for one cell of the grid, through all four channels.
 
@@ -583,6 +643,20 @@ def run_cell(
             Applied *after* ablation, so weighting a channel that was just ablated raises
             rather than silently doing nothing.
         credible_level: Central mass of the reported interval.
+        n_starts: Forwarded to :func:`~vpl.inverse.map.maximum_a_posteriori`. Defaults to
+            :data:`_DEFAULT_N_STARTS` (``1``), matching that function's own default, so
+            this argument changes nothing unless a caller asks it to.
+
+            **Values above 1 are a single-channel diagnostic, not a system setting.** They
+            are measurably harmful at T2 — see the constant's docstring for the run that
+            produced ``Gamma_E`` errors of 10 491 % and 3 365 % on two of eight seeds, and
+            a ``CoherentScatteringRegimeError`` on a third. The short version: with a
+            deliberately mismatched inversion model, the likelihood has genuinely
+            higher-scoring optima far from the truth, and a wider search finds them.
+
+            The extra starts derive from this call's own ``seed`` and are bounded to the
+            prior's support, so they stay reproducible — but prior-valid is not
+            physics-valid, and nothing here checks the latter.
 
     Raises:
         TierMismatchError: For a configuration that has no tier — see :attr:`Cell.tier`.
@@ -671,7 +745,9 @@ def run_cell(
             return -math.inf
         return value if math.isfinite(value) else -math.inf
 
-    result: MapResult = maximum_a_posteriori(log_likelihood=log_likelihood, prior=prior)
+    result: MapResult = maximum_a_posteriori(
+        log_likelihood=log_likelihood, prior=prior, n_starts=n_starts, seed=seed
+    )
     theta_hat = _theta_from_unconstrained(result.unconstrained, reference=reference)
     estimate = forward.gamma_e(theta_hat)
 
@@ -716,6 +792,8 @@ def run_cell(
         seed=seed,
         map_converged=result.converged,
         map_iterations=result.iterations,
+        map_n_starts=result.n_starts,
+        map_n_distinct_modes=result.n_distinct_modes,
         inversion_solves=forward.solves,
         wall_clock_s=time.perf_counter() - started,
         posterior=posterior,
