@@ -14,7 +14,8 @@
 
 - **Python:** `requires-python = ">=3.12,<3.13"` for `vpl-jury`. `vpl-core` is `>=3.11,<3.13` and has `UP040`/`UP047` disabled — any type alias added to `vpl-core` **must** use the `X: TypeAlias = ...` spelling, never `type X = ...`.
 - **mypy:** `strict = true`, `warn_unreachable`, `disallow_any_generics`. Root `pyproject.toml`'s `mypy_path` carries one entry per package and its comment says "Append a package here when you add one" — `packages/vpl-jury/src` must be appended.
-- **ruff:** line length 100. Active rule families include `PTH` (use `pathlib`, never `os.path`), `ARG` (no unused arguments), `SIM`, `RET`, `B`, `A` (no shadowing builtins), `PT` (pytest style), `I` (isort).
+- **ruff:** line length 100. Active rule families include `PTH` (use `pathlib`, never `os.path`), `ARG` (no unused arguments), `SIM`, `RET`, `B`, `A` (no shadowing builtins), `PT` (pytest style), `I` (isort), `RUF`.
+- **`RUF100` bans `# noqa` for rules that are not enabled.** `BLE` (blind except) and `S` (bandit) are **not** in the select list, so `# noqa: BLE001` and `# noqa: S104` are themselves lint errors. Do not add them. A bare `except Exception:` needs no suppression here — write the explanatory comment without the `noqa`. `ARG001` and `F401` *are* enabled and their suppressions are legitimate.
 - **pytest:** `testpaths = ["packages"]`, `--strict-markers`, `--strict-config`, and **`filterwarnings = ["error"]`** — any warning fails the test. Registered markers only: `physics`, `statistical`, `integration`, `slow`, `gpu`, `fenicsx`.
 - **Coverage:** `source = ["packages"]`, `omit = ["*/tests/*"]`, target ≥ 80 %.
 - **Test classification:** every test in this plan is **software correctness**, not physics verification (doc 08 §8 counts them separately). Do **not** apply the `physics` marker to anything here.
@@ -1272,7 +1273,7 @@ Immediately after `tier = cell.tier`, insert the emitter:
             return
         try:
             progress(ProgressEvent(kind=kind, payload=dict(payload)))  # type: ignore[arg-type]
-        except Exception:  # noqa: BLE001 - an observer must not be able to fail a run
+        except Exception:  # an observer must not be able to fail a run
             _LOG.exception("progress observer raised on a %r event; continuing", kind)
 ```
 
@@ -4016,7 +4017,7 @@ def _check_rederivation(config: TapeEvent, revealed: float) -> list[str]:
     )
     try:
         expected = truth_gamma_e(cell, seed=seed)
-    except Exception as error:  # noqa: BLE001 - any failure is a finding, not a crash
+    except Exception as error:  # any failure is a finding, not a crash
         return [f"could not re-derive the truth for seed {seed}: {error}"]
     if abs(expected / revealed - 1.0) > _TOLERANCE:
         return [
@@ -4054,7 +4055,7 @@ __all__ = ["main"]
 _DEFAULT_TAPE: Final[Path] = Path("jury-tape.jsonl")
 _DEFAULT_PORT: Final[int] = 8000
 #: Bind on every interface: the jury reaches this across a hotspot, so localhost is useless.
-_DEFAULT_HOST: Final[str] = "0.0.0.0"  # noqa: S104 - deliberate, see above
+_DEFAULT_HOST: Final[str] = "0.0.0.0"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -4398,7 +4399,7 @@ def _self_test() -> Check:
     )
     try:
         report_ = run_cell(cell, seed=0, ablate="oes")
-    except Exception as error:  # noqa: BLE001 - the point is to report, not to propagate
+    except Exception as error:  # the point is to report, not to propagate
         return Check(name="self-test", ok=False, detail=f"seed 0 failed: {error}")
     return Check(
         name="self-test",
@@ -5063,7 +5064,7 @@ def live_server(tmp_path: Path):
 
             httpx.get("http://127.0.0.1:8111/health", timeout=0.2)
             break
-        except Exception:  # noqa: BLE001 - polling for readiness
+        except Exception:  # polling for readiness
             time.sleep(0.1)
     yield "http://127.0.0.1:8111"
 
