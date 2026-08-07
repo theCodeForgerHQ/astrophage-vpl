@@ -3695,12 +3695,826 @@ verbatim, because leg 3 of the argument needs it in the juror's hands."
 
 ---
 
+### Task 12: `verify.py` — leg 3 of the proof chain
+
+**A third upstream addition, not in the design.** Verification needs the truth *without*
+running the inversion, and `run_cell`'s truth path is the private `_truth_state`. Reaching
+into a private function from another package is worse than exposing a named one, so this task
+adds `vpl.experiment.grid.truth_gamma_e(cell, *, seed, registry=None) -> float`. It is a
+thin wrapper over the existing `_truth_state` and introduces no new physics. Recorded here
+because the design says "two narrow additions" and this makes three.
+
+**Files:**
+- Modify: `packages/vpl-experiment/src/vpl/experiment/grid.py`
+- Create: `packages/vpl-jury/src/vpl/jury/verify.py`
+- Create: `packages/vpl-jury/src/vpl/jury/cli.py`
+- Test: `packages/vpl-jury/tests/test_verify.py`
+
+**Interfaces:**
+- Produces:
+  - `truth_gamma_e(cell: Cell, *, seed: int, registry: ParameterRegistry | None = None) -> float`
+  - `Verdict` — frozen slots dataclass: `run_id: str`, `ok: bool`, `findings: tuple[str, ...]`, `recomputed: str | None`, `published: str | None`.
+  - `verify_run(tape: Tape, run_id: str) -> Verdict`.
+  - `main(argv: Sequence[str] | None = None) -> int` in `cli.py`, subcommands `serve`, `verify`, `preflight`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_verify.py`:
+
+```python
+"""Leg 3: re-derive the truth from the seed and check the digest that was published first.
+
+A juror does this on their own machine against a downloaded tape. So the failures it must
+detect are the ones a tampered tape would show: a digest that does not match the value, an
+ordering that puts the reveal first, and a seed whose truth is not the truth recorded.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from vpl.core.progress import ProgressEvent
+from vpl.jury.tape import Tape
+from vpl.jury.verify import verify_run
+
+pytestmark = pytest.mark.slow
+
+
+def _record(tape: Tape, run_id: str, truth: float, commitment: str, *, reversed_: bool = False):
+    stages = [
+        ("config_accepted", {"seed": 0, "truth_fidelity": "L0", "ablate": "oes"}),
+        ("truth_sealed", {"commitment": commitment}),
+        ("estimate_committed", {"gamma_e_estimate_w_per_m2": truth * 1.01}),
+        ("seal_opened", {"gamma_e_true_w_per_m2": truth, "commitment_verified": True}),
+    ]
+    if reversed_:
+        stages[1], stages[3] = stages[3], stages[1]
+    for kind, payload in stages:
+        tape.append(run_id, ProgressEvent(kind=kind, payload=payload))  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def honest(tmp_path: Path) -> Tape:
+    """A tape recording the truth that seed 0 actually produces."""
+    from vpl.core.state import Fidelity
+    from vpl.experiment.grid import Cell, EedfShape, truth_gamma_e
+    from vpl.validation.sealed import SealedTruth
+
+    cell = Cell(
+        truth=Fidelity.L0,
+        inversion=Fidelity.L0,
+        noise=True,
+        imperfect_calibration=True,
+        calibration_uncertainty=True,
+        truth_eedf=EedfShape.DRUYVESTEYN,
+    )
+    truth = truth_gamma_e(cell, seed=0)
+    tape = Tape(tmp_path / "tape.jsonl")
+    _record(tape, tape.next_run_id(), truth, SealedTruth(value=truth, name="Gamma_E").commitment())
+    return tape
+
+
+class TestAnHonestRun:
+    def test_it_verifies(self, honest: Tape) -> None:
+        verdict = verify_run(honest, "r-0001")
+
+        assert verdict.ok is True, verdict.findings
+
+    def test_it_reports_no_findings(self, honest: Tape) -> None:
+        assert verify_run(honest, "r-0001").findings == ()
+
+    def test_the_recomputed_digest_matches_the_published_one(self, honest: Tape) -> None:
+        verdict = verify_run(honest, "r-0001")
+
+        assert verdict.recomputed == verdict.published
+
+
+class TestTampering:
+    def test_a_digest_that_does_not_match_the_value_is_caught(self, tmp_path: Path) -> None:
+        tape = Tape(tmp_path / "tape.jsonl")
+        _record(tape, tape.next_run_id(), 9398.6, "0" * 64)
+
+        verdict = verify_run(tape, "r-0001")
+
+        assert verdict.ok is False
+        assert any("digest" in finding for finding in verdict.findings)
+
+    def test_a_revealed_value_that_is_not_the_seeds_truth_is_caught(
+        self, tmp_path: Path
+    ) -> None:
+        # The strongest check: the seed determines the truth, so a swapped value cannot
+        # survive re-derivation even if its digest is self-consistent.
+        from vpl.validation.sealed import SealedTruth
+
+        fabricated = 1234.5
+        tape = Tape(tmp_path / "tape.jsonl")
+        _record(
+            tape,
+            tape.next_run_id(),
+            fabricated,
+            SealedTruth(value=fabricated, name="Gamma_E").commitment(),
+        )
+
+        verdict = verify_run(tape, "r-0001")
+
+        assert verdict.ok is False
+        assert any("re-derived" in finding for finding in verdict.findings)
+
+    def test_a_reveal_before_the_commitment_is_caught(self, tmp_path: Path) -> None:
+        from vpl.validation.sealed import SealedTruth
+
+        truth = 9398.6
+        tape = Tape(tmp_path / "tape.jsonl")
+        _record(
+            tape,
+            tape.next_run_id(),
+            truth,
+            SealedTruth(value=truth, name="Gamma_E").commitment(),
+            reversed_=True,
+        )
+
+        verdict = verify_run(tape, "r-0001")
+
+        assert verdict.ok is False
+        assert any("before" in finding for finding in verdict.findings)
+
+
+class TestMissingData:
+    def test_an_unknown_run_id_is_reported_not_raised(self, honest: Tape) -> None:
+        verdict = verify_run(honest, "r-9999")
+
+        assert verdict.ok is False
+        assert any("no events" in finding for finding in verdict.findings)
+
+    def test_a_run_with_no_reveal_cannot_be_verified(self, tmp_path: Path) -> None:
+        tape = Tape(tmp_path / "tape.jsonl")
+        run_id = tape.next_run_id()
+        tape.append(run_id, ProgressEvent(kind="truth_sealed", payload={"commitment": "a" * 64}))
+
+        verdict = verify_run(tape, run_id)
+
+        assert verdict.ok is False
+        assert any("never revealed" in finding for finding in verdict.findings)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_verify.py -v`
+Expected: FAIL — `ImportError: cannot import name 'truth_gamma_e'`
+
+- [ ] **Step 3: Expose the truth path**
+
+In `grid.py`, add to `__all__` and define, immediately after `run_cell`:
+
+```python
+def truth_gamma_e(
+    cell: Cell, *, seed: int, registry: ParameterRegistry | None = None
+) -> float:
+    """``Gamma_E`` of the sealed truth this cell and seed produce, without inverting.
+
+    Verification needs the truth and nothing else: given the seed a juror chose, re-derive
+    what the truth was and check it against the digest published before the estimate
+    existed. Running the whole inversion to obtain it would cost thirty seconds for a
+    number the truth path produces in milliseconds.
+
+    Exposed rather than left to callers reaching for ``_truth_state``, because a private
+    function used across a package boundary is a private function in name only.
+
+    Note:
+        This does **not** unseal anything — no inversion has occurred, so there is nothing
+        to protect the caller from. The sealed-truth barrier exists to keep the truth away
+        from the *estimator*, and this function has no estimator in it.
+    """
+    resolved = registry if registry is not None else default_registry()
+    species = _argon_ion(resolved)
+    _, gamma_e_true, _ = _truth_state(
+        cell,
+        seed=seed,
+        species=species,
+        registry=resolved,
+        grid=observation_grid(resolved),
+        l2_truth_path=None,
+    )
+    return float(gamma_e_true)
+```
+
+- [ ] **Step 4: Write `verify.py`**
+
+Create `packages/vpl-jury/src/vpl/jury/verify.py`:
+
+```python
+"""Leg 3 of the proof chain: independent recomputation.
+
+Legs 1 and 2 are properties of the run and its log — the truth is a function of the seed, and
+the log is append-only. Both are checkable only if somebody actually checks, and this is the
+thing they run.
+
+Three findings, in increasing strength:
+
+1. **Ordering** — the commitment must be recorded before the reveal. Reads the tape only.
+2. **Digest consistency** — the published digest must be the digest of the revealed value.
+   Catches a value edited after the fact.
+3. **Re-derivation** — the revealed value must be what the recorded seed actually produces.
+   This is the one that cannot be forged by editing the tape, because it recomputes the
+   physics.
+
+A tampered log can satisfy 1 and 2 together by editing both fields consistently. Only 3
+closes that, and only because the seed determines the truth.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from vpl.core.state import Fidelity
+from vpl.experiment.grid import Cell, EedfShape, truth_gamma_e
+from vpl.jury.events import TapeEvent
+from vpl.jury.tape import Tape
+from vpl.validation.sealed import SealedTruth
+
+__all__ = ["Verdict", "verify_run"]
+
+#: Fractional tolerance on the re-derived truth. The truth path is deterministic given the
+#: seed, so this guards float formatting through JSON rather than any physical variation.
+_TOLERANCE = 1e-9
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """What verification concluded, and why."""
+
+    run_id: str
+    ok: bool
+    findings: tuple[str, ...]
+    published: str | None = None
+    recomputed: str | None = None
+
+
+def verify_run(tape: Tape, run_id: str) -> Verdict:
+    """Check one recorded run against the seed it claims to have used.
+
+    Returns a :class:`Verdict` rather than raising, because every failure here is a finding
+    to be reported — including "this run cannot be verified", which is itself information.
+    """
+    events = [event for event in tape.read_all() if event.run_id == run_id]
+    if not events:
+        return Verdict(run_id, ok=False, findings=(f"no events recorded for {run_id}.",))
+
+    findings: list[str] = []
+    sealed = _first(events, "truth_sealed")
+    opened = _first(events, "seal_opened")
+    config = _first(events, "config_accepted")
+
+    if opened is None:
+        return Verdict(run_id, ok=False, findings=("the run never revealed a truth.",))
+    if sealed is None:
+        return Verdict(run_id, ok=False, findings=("no commitment was ever published.",))
+    if sealed.seq > opened.seq:
+        findings.append(
+            f"the reveal (seq {opened.seq}) was recorded before the commitment "
+            f"(seq {sealed.seq}); the ordering the run claims did not happen."
+        )
+
+    published = str(sealed.payload.get("commitment", ""))
+    revealed = float(opened.payload["gamma_e_true_w_per_m2"])  # type: ignore[arg-type]
+    recomputed = SealedTruth(value=revealed, name="Gamma_E").commitment()
+    if recomputed != published:
+        findings.append(
+            f"the published digest does not match the revealed value: published "
+            f"{published[:16]}…, digest of the revealed value {recomputed[:16]}…."
+        )
+
+    if config is None:
+        findings.append("no configuration was recorded, so the truth cannot be re-derived.")
+    else:
+        findings.extend(_check_rederivation(config, revealed))
+
+    return Verdict(
+        run_id,
+        ok=not findings,
+        findings=tuple(findings),
+        published=published,
+        recomputed=recomputed,
+    )
+
+
+def _check_rederivation(config: TapeEvent, revealed: float) -> list[str]:
+    seed = config.payload.get("seed")
+    fidelity = config.payload.get("truth_fidelity")
+    if not isinstance(seed, int) or not isinstance(fidelity, str):
+        return ["the recorded configuration is incomplete; cannot re-derive."]
+    cell = Cell(
+        truth=Fidelity(fidelity),
+        inversion=Fidelity.L0,
+        noise=True,
+        imperfect_calibration=True,
+        calibration_uncertainty=True,
+        truth_eedf=EedfShape.DRUYVESTEYN,
+    )
+    try:
+        expected = truth_gamma_e(cell, seed=seed)
+    except Exception as error:  # noqa: BLE001 - any failure is a finding, not a crash
+        return [f"could not re-derive the truth for seed {seed}: {error}"]
+    if abs(expected / revealed - 1.0) > _TOLERANCE:
+        return [
+            f"the re-derived truth for seed {seed} is {expected:.6e} W/m**2, but the tape "
+            f"records {revealed:.6e}. The seed determines the truth, so these cannot differ "
+            f"in an untampered record."
+        ]
+    return []
+
+
+def _first(events: Sequence[TapeEvent], kind: str) -> TapeEvent | None:
+    return next((event for event in events if event.kind == kind), None)
+```
+
+- [ ] **Step 5: Write `cli.py`**
+
+Create `packages/vpl-jury/src/vpl/jury/cli.py`:
+
+```python
+"""Three commands, matching the three things a presenter does.
+
+`preflight` before the jury arrives, `serve` while they are there, `verify` when somebody
+asks how they know.
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Final
+
+__all__ = ["main"]
+
+_DEFAULT_TAPE: Final[Path] = Path("jury-tape.jsonl")
+_DEFAULT_PORT: Final[int] = 8000
+#: Bind on every interface: the jury reaches this across a hotspot, so localhost is useless.
+_DEFAULT_HOST: Final[str] = "0.0.0.0"  # noqa: S104 - deliberate, see above
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="vpl-jury", description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    serve = commands.add_parser("serve", help="run the jury server")
+    serve.add_argument("--tape", type=Path, default=_DEFAULT_TAPE)
+    serve.add_argument("--host", default=_DEFAULT_HOST)
+    serve.add_argument("--port", type=int, default=_DEFAULT_PORT)
+
+    verify = commands.add_parser("verify", help="check a recorded run against its seed")
+    verify.add_argument("run_id")
+    verify.add_argument("--tape", type=Path, default=_DEFAULT_TAPE)
+
+    preflight = commands.add_parser("preflight", help="check the machine before the jury")
+    preflight.add_argument("--tape", type=Path, default=_DEFAULT_TAPE)
+    preflight.add_argument(
+        "--self-test",
+        action="store_true",
+        help="also run one real inversion end to end (~20 s)",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    namespace = _parser().parse_args(argv)
+
+    if namespace.command == "verify":
+        from vpl.jury.tape import Tape
+        from vpl.jury.verify import verify_run
+
+        verdict = verify_run(Tape(namespace.tape), namespace.run_id)
+        if verdict.ok:
+            print(f"{verdict.run_id}: VERIFIED")
+            print(f"  commitment {verdict.published}")
+            print("  re-derived the truth from the recorded seed and it matches.")
+            return 0
+        print(f"{verdict.run_id}: NOT VERIFIED")
+        for finding in verdict.findings:
+            print(f"  - {finding}")
+        return 1
+
+    if namespace.command == "preflight":
+        from vpl.jury.preflight import report, run_preflight
+
+        checks = run_preflight(namespace.tape, self_test=namespace.self_test)
+        print(report(checks))
+        return 0 if all(check.ok for check in checks) else 1
+
+    from vpl.jury.serve import serve
+
+    serve(tape=namespace.tape, host=namespace.host, port=namespace.port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 6: Run the test**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_verify.py -v`
+Expected: 8 passed.
+
+- [ ] **Step 7: Verify and commit**
+
+```bash
+uv run ruff check packages/vpl-jury packages/vpl-experiment
+uv run mypy packages/vpl-jury packages/vpl-experiment
+git add packages/vpl-jury packages/vpl-experiment
+git commit -m "feat(jury): verify a recorded run against the seed it claims
+
+Three findings, increasing in strength: ordering (reads the tape),
+digest consistency (catches an edited value), and re-derivation (cannot be
+forged, because the seed determines the truth). A tampered log can satisfy
+the first two by editing both fields consistently; only the third closes it.
+
+Adds vpl.experiment.truth_gamma_e — a third upstream addition the design
+did not anticipate. Verification needs the truth without the inversion, and
+reaching into the private _truth_state across a package boundary would make
+it private in name only."
+```
+
+---
+
+### Task 13: `preflight.py` and `serve.py`
+
+**Files:**
+- Create: `packages/vpl-jury/src/vpl/jury/preflight.py`
+- Create: `packages/vpl-jury/src/vpl/jury/serve.py`
+- Test: `packages/vpl-jury/tests/test_preflight.py`
+
+**Interfaces:**
+- Produces:
+  - `Check` — frozen slots dataclass: `name: str`, `ok: bool`, `detail: str`.
+  - `run_preflight(tape_path: Path, *, self_test: bool = False) -> tuple[Check, ...]`.
+  - `report(checks: Sequence[Check]) -> str`.
+  - `git_revision() -> tuple[str, bool]` — `(short sha, dirty)`.
+  - `lan_address() -> str | None`.
+  - `serve(*, tape: Path, host: str, port: int) -> None` in `serve.py`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/vpl-jury/tests/test_preflight.py`:
+
+```python
+"""Find out in the green room, not on stage.
+
+Each check answers a question that has a wrong answer worth discovering early: is the tree
+dirty, can T2 run at all, is there an address the jury can reach, can the tape be written.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from vpl.jury.preflight import Check, git_revision, lan_address, report, run_preflight
+
+
+class TestGitRevision:
+    def test_it_reports_a_short_sha_and_a_dirty_flag(self) -> None:
+        sha, dirty = git_revision()
+
+        assert len(sha) >= 7
+        assert isinstance(dirty, bool)
+
+
+class TestLanAddress:
+    def test_it_returns_an_address_or_none_without_raising(self) -> None:
+        address = lan_address()
+
+        assert address is None or address.count(".") == 3
+
+
+class TestThePreflight:
+    def test_it_checks_the_tape_is_writable(self, tmp_path: Path) -> None:
+        checks = run_preflight(tmp_path / "tape.jsonl")
+
+        tape_check = next(check for check in checks if check.name == "tape")
+
+        assert tape_check.ok is True
+
+    def test_an_unwritable_tape_directory_fails(self, tmp_path: Path) -> None:
+        checks = run_preflight(tmp_path / "absent" / "nested" / "tape.jsonl")
+
+        tape_check = next(check for check in checks if check.name == "tape")
+
+        assert tape_check.ok is False
+
+    def test_it_reports_whether_t2_is_available(self, tmp_path: Path) -> None:
+        checks = run_preflight(tmp_path / "tape.jsonl")
+
+        fidelity = next(check for check in checks if check.name == "truth-fidelities")
+
+        assert "L0" in fidelity.detail
+
+    def test_it_records_the_git_revision(self, tmp_path: Path) -> None:
+        checks = run_preflight(tmp_path / "tape.jsonl")
+
+        assert any(check.name == "revision" for check in checks)
+
+    def test_the_self_test_is_skipped_unless_asked_for(self, tmp_path: Path) -> None:
+        checks = run_preflight(tmp_path / "tape.jsonl")
+
+        assert not any(check.name == "self-test" for check in checks)
+
+
+class TestTheReport:
+    def test_it_marks_failures_visibly(self) -> None:
+        rendered = report([Check(name="tape", ok=False, detail="not writable")])
+
+        assert "FAIL" in rendered
+        assert "not writable" in rendered
+
+    def test_it_marks_passes(self) -> None:
+        rendered = report([Check(name="tape", ok=True, detail="/tmp/tape.jsonl")])
+
+        assert "ok" in rendered.lower()
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_preflight.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'vpl.jury.preflight'`
+
+- [ ] **Step 3: Write `preflight.py`**
+
+Create `packages/vpl-jury/src/vpl/jury/preflight.py`:
+
+```python
+"""Checks worth running before the jury arrives rather than in front of them.
+
+Every check here corresponds to a failure that is cheap to find now and expensive to find
+later. The dirty-tree check is the one most likely to be shrugged at and should not be: the
+verification argument assumes the code being verified is the code that ran, and a dirty tree
+means the recorded revision does not fully identify it. Reporting it is the same discipline
+`docs/plans/2026-08-07-results.md` already applies to its own measurements.
+"""
+
+from __future__ import annotations
+
+import shutil
+import socket
+import subprocess
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+__all__ = ["Check", "git_revision", "lan_address", "report", "run_preflight"]
+
+#: Free space below which the tape is at risk. Events are tiny; this is a smoke alarm, not a
+#: budget.
+_MINIMUM_FREE_MB: Final[int] = 50
+
+#: A routable address that is never contacted — connecting a UDP socket to it makes the OS
+#: choose the outbound interface, which is the address the jury can reach.
+_DISCOVERY_TARGET: Final[tuple[str, int]] = ("192.0.2.1", 9)
+
+
+@dataclass(frozen=True, slots=True)
+class Check:
+    """One question, its answer, and enough detail to act on it."""
+
+    name: str
+    ok: bool
+    detail: str
+
+
+def git_revision() -> tuple[str, bool]:
+    """`(short sha, dirty)` for the working tree, or `("unknown", True)`.
+
+    Unknown counts as dirty: an unidentifiable revision is not a clean one, and the
+    conservative reading is the one that gets displayed.
+    """
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown", True
+    return sha, bool(status)
+
+
+def lan_address() -> str | None:
+    """The address a phone on the same network should use, or `None`."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(_DISCOVERY_TARGET)
+            return str(probe.getsockname()[0])
+    except OSError:
+        return None
+
+
+def run_preflight(tape_path: Path, *, self_test: bool = False) -> tuple[Check, ...]:
+    """Everything worth knowing before the jury arrives."""
+    checks = [
+        _revision(),
+        _fidelities(),
+        _address(),
+        _tape(tape_path),
+        _disk(tape_path),
+    ]
+    if self_test:
+        checks.append(_self_test())
+    return tuple(checks)
+
+
+def _revision() -> Check:
+    sha, dirty = git_revision()
+    return Check(
+        name="revision",
+        ok=not dirty,
+        detail=f"{sha}{' (DIRTY — the recorded revision does not identify the code)' if dirty else ''}",
+    )
+
+
+def _fidelities() -> Check:
+    available = ["L0"]
+    try:
+        import dolfinx  # noqa: F401
+    except ImportError:
+        return Check(
+            name="truth-fidelities",
+            ok=False,
+            detail="L0 only — dolfinx is absent, so T2 is unavailable and the interface "
+            "will disable it. Run inside the vpl-t2 environment for the headline result.",
+        )
+    available.append("L1")
+    return Check(name="truth-fidelities", ok=True, detail=f"{', '.join(available)} (T1 and T2)")
+
+
+def _address() -> Check:
+    address = lan_address()
+    if address is None:
+        return Check(name="address", ok=False, detail="no outbound interface found")
+    return Check(name="address", ok=True, detail=address)
+
+
+def _tape(path: Path) -> Check:
+    parent = path.parent if str(path.parent) else Path()
+    if not parent.is_dir():
+        return Check(name="tape", ok=False, detail=f"{parent} is not a directory")
+    try:
+        with path.open("a", encoding="utf-8"):
+            pass
+    except OSError as error:
+        return Check(name="tape", ok=False, detail=f"{path} is not writable: {error}")
+    return Check(name="tape", ok=True, detail=str(path))
+
+
+def _disk(path: Path) -> Check:
+    target = path.parent if path.parent.is_dir() else Path()
+    free_mb = shutil.disk_usage(target).free // (1024 * 1024)
+    return Check(
+        name="disk",
+        ok=free_mb >= _MINIMUM_FREE_MB,
+        detail=f"{free_mb} MB free",
+    )
+
+
+def _self_test() -> Check:
+    """One real inversion, end to end. The only check that proves the pipeline works."""
+    from vpl.core.state import Fidelity
+    from vpl.experiment.grid import Cell, EedfShape, run_cell
+
+    cell = Cell(
+        truth=Fidelity.L0,
+        inversion=Fidelity.L0,
+        noise=True,
+        imperfect_calibration=True,
+        calibration_uncertainty=True,
+        truth_eedf=EedfShape.DRUYVESTEYN,
+    )
+    try:
+        report_ = run_cell(cell, seed=0, ablate="oes")
+    except Exception as error:  # noqa: BLE001 - the point is to report, not to propagate
+        return Check(name="self-test", ok=False, detail=f"seed 0 failed: {error}")
+    return Check(
+        name="self-test",
+        ok=True,
+        detail=f"seed 0 at T{int(report_.tier)}: error {report_.relative_error:.4%}",
+    )
+
+
+def report(checks: Sequence[Check]) -> str:
+    """Render for a terminal the presenter is reading two minutes before starting."""
+    width = max((len(check.name) for check in checks), default=0)
+    lines = [
+        f"  {'FAIL' if not check.ok else '  ok'}  {check.name:<{width}}  {check.detail}"
+        for check in checks
+    ]
+    verdict = "READY" if all(check.ok for check in checks) else "NOT READY"
+    return "\n".join(["", *lines, "", f"  {verdict}", ""])
+```
+
+- [ ] **Step 4: Write `serve.py`**
+
+Create `packages/vpl-jury/src/vpl/jury/serve.py`:
+
+```python
+"""Wiring: build the collaborators, refuse to start if preflight fails, run the loop."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import uvicorn
+
+from vpl.jury.broker import Broker
+from vpl.jury.preflight import lan_address, report, run_preflight
+from vpl.jury.queue import RunQueue
+from vpl.jury.server import build_app
+from vpl.jury.tape import Tape
+
+__all__ = ["serve"]
+
+
+def serve(*, tape: Path, host: str, port: int) -> None:
+    """Run the jury server, after saying out loud whether the machine is ready.
+
+    Preflight is printed rather than merely consulted: the presenter needs to see the dirty
+    flag and the join URL, and a check whose output nobody reads is not a check. A failing
+    tape check aborts, because an unrecorded run cannot be verified and the whole argument
+    rests on the record.
+    """
+    checks = run_preflight(tape)
+    print(report(checks))
+    if not next(check for check in checks if check.name == "tape").ok:
+        raise SystemExit("refusing to start: the tape is not writable.")
+
+    address = lan_address() or host
+    join_url = f"http://{address}:{port}"
+    print(f"  jury join URL: {join_url}")
+    print(f"  QR:            {join_url}/qr.svg\n")
+
+    store = Tape(tape)
+    broker = Broker()
+    queue = RunQueue(store, publish=broker.publish)
+    app = build_app(tape=store, queue=queue, broker=broker, join_url=join_url)
+
+    async def _run() -> None:
+        worker = asyncio.create_task(queue.run_forever())
+        config = uvicorn.Config(app, host=host, port=port, log_level="warning")
+        try:
+            await uvicorn.Server(config).serve()
+        finally:
+            await queue.stop()
+            await worker
+
+    asyncio.run(_run())
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `uv run pytest packages/vpl-jury/tests/test_preflight.py -v`
+Expected: 10 passed.
+
+- [ ] **Step 6: Confirm preflight passes for real in the T2 environment**
+
+```bash
+micromamba run -n vpl-t2 env PYTHONPATH=packages/vpl-core/src:packages/vpl-physics/src:packages/vpl-validation/src:packages/vpl-instruments/src:packages/vpl-inverse/src:packages/vpl-experiment/src:packages/vpl-jury/src \
+  python -m vpl.jury.cli preflight --tape /tmp/jury-tape.jsonl --self-test
+```
+Expected: `truth-fidelities` reports `L0, L1 (T1 and T2)` and the self-test reports a T1
+error around 0.88 %. The `revision` check will say DIRTY while this branch has uncommitted
+work — that is the check working, not failing.
+
+- [ ] **Step 7: Verify and commit**
+
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+git add packages/vpl-jury
+git commit -m "feat(jury): preflight, and the wiring that refuses to start without a tape
+
+Five checks, each for a failure that is cheap now and expensive later. The
+dirty-tree check is the one most likely to be shrugged at and should not
+be: verification assumes the code verified is the code that ran, and a
+dirty tree means the recorded revision does not identify it.
+
+serve() prints preflight rather than merely consulting it — a check whose
+output nobody reads is not a check — and aborts on an unwritable tape,
+because an unrecorded run cannot be verified."
+```
+
+---
+
 ### Remaining tasks
 
 | Task | Deliverable |
 |---|---|
-| 12 | `verify.py` + `cli.py` — re-derive truth from seed in a fresh process, compare digest, detect tampering |
-| 13 | `preflight.py` — git SHA/dirty, dolfinx detection, LAN IP, QR, disk check, seed-0 self-test |
+| 14 | Frontend (`index.html`, `app.js`, `app.css`) + Playwright smoke at 375 px + `fenicsx`-marked L1 smoke |
 | 14 | Frontend (`index.html`, `app.js`, `app.css`) + Playwright smoke at 375 px + `fenicsx`-marked L1 smoke |
 | 12 | `verify.py` + `cli.py` — re-derive truth from seed in a fresh process, compare digest, detect tampering |
 | 13 | `preflight.py` — git SHA/dirty, dolfinx detection, LAN IP, QR, disk check, seed-0 self-test |
