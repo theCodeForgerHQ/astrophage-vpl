@@ -36,15 +36,21 @@ import numpy as np
 import pytest
 
 from vpl.core.state import PlasmaParams, PlasmaState, SpatialGrid
+from vpl.core.units import magnitude_in
 from vpl.experiment.channels import CHANNEL_NAMES
+from vpl.experiment.closed_loop import _reference_theta
 from vpl.experiment.discrepancy_basis import (
     DISCREPANCY_GRID,
+    DISCREPANCY_SPAN,
+    DiscrepancySweepError,
+    DiscrepancySweepResult,
     _compress_to_rank,
     estimate_channel_discrepancy,
     load_channel_discrepancy,
     save_channel_discrepancy,
 )
 from vpl.experiment.l2_truth import observation_grid
+from vpl.inverse.parameters import ControlParameters
 from vpl.physics.analytic.sheath import AnalyticSheathSolver
 
 #: Multiplicative shift the stand-in applies to ``T_e`` before solving. Large enough that the
@@ -104,11 +110,15 @@ def _cheap_shifted_basis() -> dict[str, np.ndarray]:
 
 
 def _estimate(high: object, *, grid_points: int) -> dict[str, np.ndarray]:
-    return estimate_channel_discrepancy(
+    result = estimate_channel_discrepancy(
         seed=0,
         high_solver=high,  # type: ignore[arg-type]
         grid_points=grid_points,
     )
+    assert isinstance(result, DiscrepancySweepResult)
+    assert not result.failures
+    assert result.grid_points_converged == result.grid_points_total == grid_points**2
+    return result.basis
 
 
 class TestTheBasisHasTheShapeTheInstrumentsExpect:
@@ -292,3 +302,157 @@ class TestTheRealSweepSize:
             assert k > 0, name
         assert basis["interferometry"].shape == (1, 1)
         assert basis["oes"].shape[0] == DISCREPANCY_GRID**2
+
+
+class _FailsAtExactTheta:
+    """Stands in for a solver that cannot converge at specific nominal grid points.
+
+    Fails only when handed one of ``failing_thetas`` *exactly* — comparison is on the raw
+    ``(n_0, T_e)`` magnitudes the sweep computed, which is what a nominal grid point looks
+    like. Both axes have to be checked: with a small grid, two different grid points can
+    share an ``n_0`` (same row, different ``T_e``), and matching on ``n_0`` alone would
+    fail both instead of the one point under test. A retry that nudges ``theta`` even
+    fractionally toward the reference no longer matches any entry and succeeds, which is
+    the behaviour :func:`_solve_with_bounded_retry` is built to exploit: a point that
+    fails at its labelled position may still converge a little way toward the reference.
+    """
+
+    def __init__(
+        self, grid: SpatialGrid, *, failing_thetas: frozenset[tuple[float, float]]
+    ) -> None:
+        self._solver = AnalyticSheathSolver()
+        self._grid = grid
+        self._failing_thetas = failing_thetas
+
+    def solve(self, params: PlasmaParams) -> PlasmaState:
+        n_0 = float(magnitude_in(params.n_0, "m**-3"))
+        t_e = float(magnitude_in(params.T_e, "eV"))
+        if any(abs(n_0 - fn) < 1.0 and abs(t_e - ft) < 1e-9 for fn, ft in self._failing_thetas):
+            raise RuntimeError("stand-in Newton failure at this exact theta")
+        shifted = params.replace(T_e=params.T_e * _STANDIN_T_E_FACTOR)
+        return self._solver.solve(shifted, grid=self._grid)
+
+
+class _AlwaysFails:
+    """A solver that never converges, anywhere — the give-up path, exercised cheaply."""
+
+    def solve(self, params: PlasmaParams) -> PlasmaState:
+        raise RuntimeError("stand-in Newton failure, unconditionally")
+
+
+def _nominal_thetas(*, grid_points: int) -> list[tuple[float, float]]:
+    """The exact ``(n_0, T_e)`` pairs :func:`_sweep_thetas` visits, in its own order."""
+    reference: ControlParameters = _reference_theta()
+    factors = np.linspace(*DISCREPANCY_SPAN, grid_points)
+    return [(reference.n_0 * fn, reference.T_e * ft) for fn in factors for ft in factors]
+
+
+class TestNonConvergenceIsNeverSilent:
+    """Recovery plan Block G: a solve that never converged must not enter the basis
+    unannounced. Either the sweep raises, naming every failed point, or the caller opted
+    into exclusion and the result says explicitly what was left out and how much rank that
+    cost — never a basis that looks full when it is not.
+    """
+
+    def test_a_fully_converged_sweep_reports_zero_failures_and_full_rank(self) -> None:
+        result = estimate_channel_discrepancy(
+            seed=0,
+            high_solver=_ShiftedL0(observation_grid()),  # type: ignore[arg-type]
+            grid_points=_CHEAP_GRID,
+        )
+
+        assert result.failures == ()
+        assert result.nudged == ()
+        assert result.grid_points_converged == result.grid_points_total == _CHEAP_GRID**2
+        assert result.rank == _CHEAP_GRID**2
+
+    def test_by_default_a_nonconvergent_point_raises_rather_than_entering_the_basis(
+        self,
+    ) -> None:
+        # The failure mode Block G exists to prevent: without this, a point that never
+        # converged could silently sit inside `basis` with nothing distinguishing its row
+        # from a converged one.
+        grid = observation_grid()
+        failing = _nominal_thetas(grid_points=_CHEAP_GRID)[0]
+        solver = _FailsAtExactTheta(grid, failing_thetas=frozenset({failing}))
+
+        with pytest.raises(DiscrepancySweepError) as excinfo:
+            estimate_channel_discrepancy(
+                seed=0,
+                high_solver=solver,  # type: ignore[arg-type]
+                grid_points=_CHEAP_GRID,
+                max_retries=0,  # no nudge can dodge an exact-match failure trivially
+            )
+
+        assert excinfo.value.grid_points_total == _CHEAP_GRID**2
+        assert len(excinfo.value.failures) == 1
+        assert excinfo.value.failures[0].index == 0
+
+    def test_exclude_mode_reports_the_reduced_rank_instead_of_raising(self) -> None:
+        grid = observation_grid()
+        nominal = _nominal_thetas(grid_points=_CHEAP_GRID)
+        failing = frozenset(nominal[:1])
+        solver = _FailsAtExactTheta(grid, failing_thetas=failing)
+
+        result = estimate_channel_discrepancy(
+            seed=0,
+            high_solver=solver,  # type: ignore[arg-type]
+            grid_points=_CHEAP_GRID,
+            on_nonconvergence="exclude",
+            max_retries=0,
+        )
+
+        assert len(result.failures) == 1
+        assert result.failures[0].index == 0
+        assert result.grid_points_converged == _CHEAP_GRID**2 - 1
+        assert result.rank == result.grid_points_converged
+        for matrix in result.basis.values():
+            k, _n = matrix.shape
+            assert k <= result.grid_points_converged
+
+    def test_a_point_that_only_converges_after_a_retry_is_recorded_as_nudged(self) -> None:
+        # The point fails exactly at its nominal theta but a retry nudges it toward the
+        # reference, where the fake no longer matches and succeeds — exercising the
+        # "continuation: step in from a converged neighbour" path without dolfinx.
+        grid = observation_grid()
+        failing = _nominal_thetas(grid_points=_CHEAP_GRID)[0]
+        solver = _FailsAtExactTheta(grid, failing_thetas=frozenset({failing}))
+
+        result = estimate_channel_discrepancy(
+            seed=0,
+            high_solver=solver,  # type: ignore[arg-type]
+            grid_points=_CHEAP_GRID,
+            max_retries=1,
+        )
+
+        assert result.failures == ()
+        assert len(result.nudged) == 1
+        assert result.nudged[0].index == 0
+        assert result.nudged[0].retries == 1
+        assert result.nudged[0].solved_theta.n_0 != result.nudged[0].nominal_theta.n_0
+
+    def test_a_solver_that_never_converges_gives_up_after_bounded_retries(self) -> None:
+        # Every point fails unconditionally, so this always hits the "nothing left to
+        # build a basis from" guard — what is checked here is that giving up happened
+        # *after* exhausting the configured retries, not before: DiscrepancySweepError in
+        # raise mode (the default) carries that count per failure.
+        with pytest.raises(DiscrepancySweepError) as excinfo:
+            estimate_channel_discrepancy(
+                seed=0,
+                high_solver=_AlwaysFails(),  # type: ignore[arg-type]
+                grid_points=_CHEAP_GRID,
+                max_retries=2,
+            )
+
+        assert len(excinfo.value.failures) == _CHEAP_GRID**2
+        assert all(f.retries == 2 for f in excinfo.value.failures)
+
+    def test_every_grid_point_failing_refuses_to_return_an_empty_basis(self) -> None:
+        with pytest.raises(ValueError, match="nothing left to build a basis from"):
+            estimate_channel_discrepancy(
+                seed=0,
+                high_solver=_AlwaysFails(),  # type: ignore[arg-type]
+                grid_points=_CHEAP_GRID,
+                on_nonconvergence="exclude",
+                max_retries=0,
+            )

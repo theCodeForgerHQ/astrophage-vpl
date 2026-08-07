@@ -81,8 +81,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Literal, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -104,6 +105,10 @@ __all__ = [
     "DISCREPANCY_GRID",
     "DISCREPANCY_SPAN",
     "ChannelDiscrepancy",
+    "ConvergenceFailure",
+    "DiscrepancySweepError",
+    "DiscrepancySweepResult",
+    "NudgedConvergence",
     "estimate_channel_discrepancy",
     "load_channel_discrepancy",
     "save_channel_discrepancy",
@@ -150,6 +155,24 @@ DISCREPANCY_SPAN: Final[tuple[float, float]] = (0.8, 1.2)
 #: chords doc 02 §8.2's ladder describes, and it is why the compression rule is min(k, n)
 #: rather than anything that subtracts.
 DISCREPANCY_GRID: Final[int] = 5
+
+#: Bounded retries a grid point gets before it is counted as a non-convergence — recovery
+#: plan Block G's "continuation: step in from a converged neighbour". The high-fidelity
+#: solver has no cross-``theta`` warm-start of its own (each solve seeds its *bias*
+#: continuation fresh from the L0 profile at its own ``theta``, per
+#: :func:`~vpl.physics.fluid.system._continue_to`), so "stepping in from a neighbour" is
+#: applied one level up: a point that fails is retried at a location fractionally closer
+#: to the reference ``theta``, which is the point every other part of this module already
+#: trusts to be inside the solver's basin (:func:`estimate_channel_discrepancy` builds
+#: ``reference_state`` from it directly). Retrying at the *nominal* ``theta`` again would
+#: reproduce the same failure; retrying somewhere else entirely would estimate a basis at
+#: a point nobody asked for.
+_MAX_NONCONVERGENCE_RETRIES: Final[int] = 3
+
+#: Fraction of the remaining distance to the reference ``theta`` each retry closes. ``0.5``
+#: halves the gap every attempt, so three retries reach 1/8, giving up before the point has
+#: drifted far enough from its grid position to no longer represent it.
+_RETRY_STEP_TOWARD_REFERENCE: Final[float] = 0.5
 
 #: npz key prefix for a channel's basis.
 _BASIS_KEY: Final[str] = "basis__"
@@ -236,11 +259,195 @@ def _states(
     fixed grid to ``solve`` would put a theta-dependent mesh into the estimate, and the
     difference between the two models would then partly be a difference between two
     discretisations.
+
+    Raises:
+        RuntimeError: If ``high_solver`` cannot converge at ``theta`` — propagated
+            unchanged from :meth:`~vpl.physics.fluid.sheath.FluidSheathSolver.solve`
+            (``run_newton`` "fails loudly rather than returning an unconverged iterate").
+            Not caught here; :func:`_solve_with_bounded_retry` decides what to do with it.
     """
     params: PlasmaParams = _to_plasma_params(theta, species=species, registry=registry)
     low = low_solver.solve(params, grid=grid)
     native = high_solver.solve(params)
     return low, _resample_onto_grid(native, grid)
+
+
+def _nudge_toward_reference(
+    theta: ControlParameters, reference: ControlParameters, *, fraction: float
+) -> ControlParameters:
+    """``theta`` moved ``fraction`` of the way to ``reference`` in ``(n_0, T_e)``.
+
+    The only two axes the sweep varies (:func:`_sweep_thetas`), so those are the only two
+    a retry needs to move. Everything else about ``theta`` — the species, the fixed
+    control parameters the reference and every grid point share — is untouched.
+    """
+    return theta.replace(
+        n_0=theta.n_0 + (reference.n_0 - theta.n_0) * fraction,
+        T_e=theta.T_e + (reference.T_e - theta.T_e) * fraction,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RetryOutcome:
+    """What :func:`_solve_with_bounded_retry` found, for the caller to record."""
+
+    low_state: PlasmaState
+    high_state: PlasmaState
+    solved_theta: ControlParameters
+    retries: int
+
+
+def _solve_with_bounded_retry(
+    theta: ControlParameters,
+    reference: ControlParameters,
+    *,
+    species: Species,
+    registry: ParameterRegistry,
+    grid: SpatialGrid,
+    low_solver: AnalyticSheathSolver,
+    high_solver: _UnconstrainedSolver,
+    max_retries: int,
+) -> _RetryOutcome:
+    """Solve at ``theta``; on non-convergence, retry closer to ``reference`` — Block G.
+
+    Each retry halves (:data:`_RETRY_STEP_TOWARD_REFERENCE`) the remaining distance to
+    ``reference``, up to ``max_retries`` times. A retry that succeeds returns states
+    solved at the *nudged* ``theta``, not the nominal grid point — the caller must record
+    that distinction (:class:`NudgedConvergence`) rather than let a shifted estimate pass
+    as the one that was asked for.
+
+    Raises:
+        RuntimeError: If ``theta`` and every retry position still do not converge. Chains
+            the last attempt's error so the underlying Newton failure is not lost.
+    """
+    current = theta
+    last_error: RuntimeError | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            low, high = _states(
+                current,
+                species=species,
+                registry=registry,
+                grid=grid,
+                low_solver=low_solver,
+                high_solver=high_solver,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            current = _nudge_toward_reference(
+                current, reference, fraction=_RETRY_STEP_TOWARD_REFERENCE
+            )
+            continue
+        return _RetryOutcome(low_state=low, high_state=high, solved_theta=current, retries=attempt)
+    assert last_error is not None  # the loop always runs at least once
+    raise RuntimeError(
+        f"did not converge at theta={theta} even after {max_retries} bounded retries "
+        f"toward the reference theta; last attempt at "
+        f"n_0={current.n_0:.6g}, T_e={current.T_e:.6g} failed with: {last_error}"
+    ) from last_error
+
+
+@dataclass(frozen=True, slots=True)
+class ConvergenceFailure:
+    """A grid point the high-fidelity solver never converged at, even after retries.
+
+    Attributes:
+        index: Position in the deterministic sweep (:func:`_sweep_thetas`), ``0``-based.
+        theta: The nominal ``(n_0, T_e, ...)`` the sweep asked for at this index.
+        retries: Bounded retries attempted before giving up.
+        error: The last attempt's error message, so *why* is not lost along with the row.
+    """
+
+    index: int
+    theta: ControlParameters
+    retries: int
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class NudgedConvergence:
+    """A grid point that converged, but not at the ``theta`` the sweep nominally asked for.
+
+    Recorded so that "the basis has full rank" cannot be read as "every row measures model
+    error at its labelled grid point" — a retried row measures it at ``solved_theta``
+    instead, fractionally closer to the reference than ``nominal_theta``.
+    """
+
+    index: int
+    nominal_theta: ControlParameters
+    solved_theta: ControlParameters
+    retries: int
+
+
+class DiscrepancySweepError(RuntimeError):
+    """The sweep contains at least one non-convergent grid point and ``on_nonconvergence``
+    is ``"raise"`` (the default) — recovery plan Block G.
+
+    Carries every failure the sweep found, not just the first: a caller that catches this
+    to decide whether ``on_nonconvergence="exclude"`` is worth trying needs the whole
+    picture, not one point that happened to fail first.
+    """
+
+    def __init__(self, failures: tuple[ConvergenceFailure, ...], *, grid_points_total: int) -> None:
+        self.failures = failures
+        self.grid_points_total = grid_points_total
+        lines = "\n".join(
+            f"  [{f.index}] n_0={f.theta.n_0:.6g}, T_e={f.theta.T_e:.6g} "
+            f"(after {f.retries} retries): {f.error}"
+            for f in failures
+        )
+        super().__init__(
+            f"{len(failures)} of {grid_points_total} discrepancy-sweep grid points did "
+            f"not converge, even after bounded retries toward the reference theta:\n{lines}\n"
+            f"A basis silently built from the remaining points would be built partly from "
+            f"unconverged solutions without saying so. Either fix the physics at these "
+            f"points, or call with on_nonconvergence='exclude' to accept a reduced-rank "
+            f"basis with these points recorded in the result."
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DiscrepancySweepResult:
+    """The basis :func:`estimate_channel_discrepancy` produced, with its convergence account.
+
+    This is the only way the function hands back a basis: there is no path that returns a
+    bare :data:`ChannelDiscrepancy` and lets a caller forget to check whether every grid
+    point actually converged. ``rank`` is ``grid_points_converged`` — the number of rows
+    that actually went into ``basis`` before :func:`_compress_to_rank` — so a caller that
+    only looks at ``basis["oes"].shape`` cannot mistake a reduced sweep for a full one:
+    :func:`_compress_to_rank` can shrink a channel's row count for reasons that have
+    nothing to do with convergence (an over-determined channel), so the row count alone is
+    not evidence either way.
+
+    Attributes:
+        basis: The per-channel discrepancy basis, built only from converged grid points.
+        grid_points_total: How many points :func:`_sweep_thetas` asked for.
+        grid_points_converged: How many of those actually went into ``basis``.
+        failures: Every point that never converged, even after retries. Empty unless
+            ``on_nonconvergence="exclude"`` was passed — otherwise a non-empty ``failures``
+            means :class:`DiscrepancySweepError` was raised instead of this being returned.
+        nudged: Every point that converged only after being retried closer to the
+            reference theta, so it is on record even though it did not fail outright.
+    """
+
+    basis: ChannelDiscrepancy
+    grid_points_total: int
+    grid_points_converged: int
+    failures: tuple[ConvergenceFailure, ...]
+    nudged: tuple[NudgedConvergence, ...]
+
+    def __post_init__(self) -> None:
+        if self.grid_points_converged + len(self.failures) != self.grid_points_total:
+            raise ValueError(
+                f"{self.grid_points_converged} converged + {len(self.failures)} failed "
+                f"!= {self.grid_points_total} total; the sweep's own bookkeeping is "
+                f"inconsistent, which is worse than either number being bad on its own"
+            )
+
+    @property
+    def rank(self) -> int:
+        """How many grid points the basis was actually built from."""
+        return self.grid_points_converged
 
 
 def estimate_channel_discrepancy(
@@ -249,9 +456,22 @@ def estimate_channel_discrepancy(
     registry: ParameterRegistry | None = None,
     high_solver: _UnconstrainedSolver | None = None,
     grid_points: int = DISCREPANCY_GRID,
+    on_nonconvergence: Literal["raise", "exclude"] = "raise",
+    max_retries: int = _MAX_NONCONVERGENCE_RETRIES,
     verbose: bool = False,
-) -> ChannelDiscrepancy:
+) -> DiscrepancySweepResult:
     """Sweep the grid and collect each channel's model-error directions.
+
+    Every grid point the high-fidelity solver cannot converge at — even after
+    :data:`_MAX_NONCONVERGENCE_RETRIES` bounded retries toward the reference theta,
+    recovery plan Block G's "continuation: step in from a converged neighbour" — is
+    handled one of two ways, and there is no third, silent one:
+
+    * ``on_nonconvergence="raise"`` (the default): :class:`DiscrepancySweepError`, naming
+      every failed point, not just the first one hit.
+    * ``on_nonconvergence="exclude"``: the failed points are left out of the basis, and
+      the returned :class:`DiscrepancySweepResult` records exactly which ones, alongside
+      the reduced ``rank`` that implies.
 
     Args:
         seed: Only the seed the channels are *constructed* with. With ``noise=False`` and
@@ -267,11 +487,19 @@ def estimate_channel_discrepancy(
             shape and rank plumbing can be exercised where dolfinx is absent — see
             ``tests/test_discrepancy_basis.py`` — **not** so that a production estimate can
             quietly be taken against something other than L1.
+        on_nonconvergence: What to do about a grid point that never converges. See above.
+        max_retries: Bounded retries per grid point before it counts as a failure.
+            Defaults to :data:`_MAX_NONCONVERGENCE_RETRIES`. Exposed for the same reason
+            ``grid_points`` is — a test can lower it to exercise the give-up path cheaply.
 
     Raises:
         NotImplementedError: If dolfinx is missing and no ``high_solver`` was supplied.
-        ValueError: If any channel produces a non-finite basis, or if the two models
-            disagree about a channel's observable shape.
+        DiscrepancySweepError: If ``on_nonconvergence="raise"`` and at least one grid
+            point did not converge.
+        ValueError: If any channel produces a non-finite basis, if the two models
+            disagree about a channel's observable shape, or if every grid point failed to
+            converge under ``on_nonconvergence="exclude"`` (there is then nothing to build
+            a basis from).
     """
     resolved = registry if registry is not None else default_registry()
     species = _argon_ion(resolved)
@@ -313,17 +541,40 @@ def estimate_channel_discrepancy(
 
     rows: dict[str, list[FloatArray]] = {name: [] for name in CHANNEL_NAMES}
     thetas = _sweep_thetas(reference, grid_points)
+    failures: list[ConvergenceFailure] = []
+    nudged: list[NudgedConvergence] = []
     for index, theta in enumerate(thetas):
-        low_state, high_state = _states(
-            theta,
-            species=species,
-            registry=resolved,
-            grid=grid,
-            low_solver=low_solver,
-            high_solver=high_solver,
-        )
-        low_obs = channels.observe(low_state)
-        high_obs = channels.observe(high_state)
+        try:
+            outcome = _solve_with_bounded_retry(
+                theta,
+                reference,
+                species=species,
+                registry=resolved,
+                grid=grid,
+                low_solver=low_solver,
+                high_solver=high_solver,
+                max_retries=max_retries,
+            )
+        except RuntimeError as exc:
+            failures.append(
+                ConvergenceFailure(index=index, theta=theta, retries=max_retries, error=str(exc))
+            )
+            if verbose:
+                print(f"[discrepancy] {index + 1}/{len(thetas)} FAILED TO CONVERGE", flush=True)
+            continue
+
+        if outcome.retries:
+            nudged.append(
+                NudgedConvergence(
+                    index=index,
+                    nominal_theta=theta,
+                    solved_theta=outcome.solved_theta,
+                    retries=outcome.retries,
+                )
+            )
+
+        low_obs = channels.observe(outcome.low_state)
+        high_obs = channels.observe(outcome.high_state)
         for name in CHANNEL_NAMES:
             low_values = np.asarray(low_obs[name].values, dtype=np.float64).reshape(-1)
             high_values = np.asarray(high_obs[name].values, dtype=np.float64).reshape(-1)
@@ -337,7 +588,18 @@ def estimate_channel_discrepancy(
         if verbose:
             print(f"[discrepancy] {index + 1}/{len(thetas)}", flush=True)
 
-    scale = math.sqrt(len(thetas))
+    if failures and on_nonconvergence == "raise":
+        raise DiscrepancySweepError(tuple(failures), grid_points_total=len(thetas))
+
+    grid_points_converged = len(thetas) - len(failures)
+    if grid_points_converged == 0:
+        raise ValueError(
+            f"all {len(thetas)} discrepancy-sweep grid points failed to converge; there is "
+            f"nothing left to build a basis from. This is not a per-point problem — check "
+            f"the solver configuration, not just the individual failures."
+        )
+
+    scale = math.sqrt(grid_points_converged)
     basis: ChannelDiscrepancy = {}
     for name in CHANNEL_NAMES:
         stacked = np.asarray(np.stack(rows[name]) / scale, dtype=np.float64)
@@ -348,7 +610,13 @@ def estimate_channel_discrepancy(
                 f"look equally good"
             )
         basis[name] = _compress_to_rank(stacked)
-    return basis
+    return DiscrepancySweepResult(
+        basis=basis,
+        grid_points_total=len(thetas),
+        grid_points_converged=grid_points_converged,
+        failures=tuple(failures),
+        nudged=tuple(nudged),
+    )
 
 
 def save_channel_discrepancy(basis: Mapping[str, FloatArray], path: Path | str) -> Path:
