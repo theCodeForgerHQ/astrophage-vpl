@@ -4510,11 +4510,740 @@ because an unrecorded run cannot be verified."
 
 ---
 
-### Remaining tasks
+### Task 14: the interface
 
-| Task | Deliverable |
+**On the font.** The design says "vendored font — no CDN". The cheapest correct way to honour
+that is the system font stack: zero bytes to transfer over a hotspot, nothing to vendor, and
+it renders natively on every phone in the room. No font file is added.
+
+**Files:**
+- Modify: `packages/vpl-jury/src/vpl/jury/static/index.html` (replacing Task 11b's placeholder)
+- Create: `packages/vpl-jury/src/vpl/jury/static/app.css`
+- Create: `packages/vpl-jury/src/vpl/jury/static/app.js`
+- Test: `packages/vpl-jury/tests/test_interface.py`
+
+**Interfaces:**
+- Consumes: `POST /runs`, `GET /events`, `GET /health`.
+- Produces: no Python API.
+
+- [ ] **Step 1: Write `index.html`**
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Astrophage VPL — live</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Astrophage VPL</h1>
+      <p class="revision" id="revision">connecting…</p>
+    </header>
+
+    <main>
+      <form id="controls" aria-label="Run configuration">
+        <div class="row">
+          <label for="seed">Seed</label>
+          <input
+            id="seed"
+            name="seed"
+            type="number"
+            min="0"
+            max="4294967295"
+            inputmode="numeric"
+            placeholder="any integer"
+            required
+          />
+        </div>
+
+        <div class="row">
+          <label for="ablate">Drop channel</label>
+          <select id="ablate" name="ablate">
+            <option value="oes" selected>OES</option>
+            <option value="">none — fuse all four</option>
+            <option value="lif">LIF</option>
+            <option value="thomson">Thomson</option>
+            <option value="interferometry">Interferometry</option>
+          </select>
+        </div>
+
+        <fieldset class="row">
+          <legend>Truth model</legend>
+          <label><input type="radio" name="truth" value="L0" /> L0 <span class="tier">T1</span></label>
+          <label><input type="radio" name="truth" value="L1" checked /> L1 <span class="tier">T2</span></label>
+        </fieldset>
+
+        <button type="submit" id="run">Run it</button>
+        <p class="error" id="error" role="alert" hidden></p>
+      </form>
+
+      <section aria-label="Runs">
+        <ol id="runs"></ol>
+      </section>
+    </main>
+
+    <footer id="scoreboard">
+      <span id="count">0 runs</span>
+      <span id="mean">—</span>
+      <span id="coverage">—</span>
+      <a href="/tape" download>download the record</a>
+    </footer>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+```
+
+- [ ] **Step 2: Write `app.css`**
+
+```css
+/*
+ * Mobile-first, 375 px up. Two deliberate choices worth stating:
+ *
+ * - the system font stack, so nothing is transferred over a hotspot and nothing is
+ *   vendored;
+ * - a monospace column for every physical number, because the jury compares figures
+ *   between runs and proportional digits make that harder than it needs to be.
+ */
+
+:root {
+  --ink: #12161c;
+  --paper: #f7f7f5;
+  --line: #d6d4cd;
+  --muted: #6a6f78;
+  --live: #0b6ea8;
+  --good: #1c6b3c;
+  --bad: #a8321f;
+
+  --gap: 0.75rem;
+  --radius: 6px;
+
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-num: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  background: var(--paper);
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+header {
+  padding: var(--gap);
+  border-bottom: 1px solid var(--line);
+}
+
+header h1 { font-size: 1rem; margin: 0; letter-spacing: 0.02em; }
+
+.revision {
+  margin: 0.15rem 0 0;
+  font-family: var(--font-num);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.revision.dirty { color: var(--bad); }
+
+main { padding: var(--gap); }
+
+#controls {
+  display: grid;
+  gap: var(--gap);
+  padding: var(--gap);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+}
+
+.row { display: grid; gap: 0.25rem; }
+
+fieldset.row {
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+
+fieldset legend { padding: 0; font-size: 0.8rem; color: var(--muted); }
+
+fieldset label { display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 1rem; }
+
+label { font-size: 0.8rem; color: var(--muted); }
+
+input[type="number"], select {
+  font: inherit;
+  font-family: var(--font-num);
+  padding: 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  /* 16px minimum, or iOS Safari zooms the whole page on focus. */
+  font-size: 1rem;
+}
+
+.tier {
+  font-family: var(--font-num);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.8rem;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: #fff;
+  /* 44 px minimum touch target. */
+  min-height: 44px;
+}
+
+button:disabled { background: var(--muted); }
+
+.error { margin: 0; color: var(--bad); font-size: 0.85rem; }
+
+#runs { list-style: none; margin: var(--gap) 0 0; padding: 0; display: grid; gap: var(--gap); }
+
+.run {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: var(--gap);
+}
+
+.run.live { border-color: var(--live); }
+
+.run h2 {
+  font-size: 0.85rem;
+  margin: 0 0 0.4rem;
+  font-family: var(--font-num);
+}
+
+.stages { list-style: none; margin: 0; padding: 0; font-size: 0.8rem; }
+
+.stages li { display: flex; gap: 0.4rem; padding: 0.1rem 0; }
+
+.stages .digest,
+.stages .value { font-family: var(--font-num); }
+
+.verdict { margin: 0.5rem 0 0; font-family: var(--font-num); font-size: 0.85rem; }
+
+.covered-true { color: var(--good); }
+.covered-false { color: var(--bad); }
+
+.note { color: var(--muted); font-size: 0.78rem; }
+
+footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: var(--gap);
+  flex-wrap: wrap;
+  padding: var(--gap);
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+  font-family: var(--font-num);
+  font-size: 0.78rem;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .run.live h2::after {
+    content: " ●";
+    color: var(--live);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.25; } }
+}
+```
+
+- [ ] **Step 3: Write `app.js`**
+
+```javascript
+/*
+ * One EventSource, one render function, no framework and no build step.
+ *
+ * The tape is the source of truth for the whole screen: every run is rebuilt from the
+ * events it has received rather than from local state updated on submit. That is the same
+ * discipline the server keeps — a run's appearance and its record cannot disagree, because
+ * there is only one of them.
+ */
+
+const runs = new Map();
+
+const el = {
+  revision: document.getElementById("revision"),
+  form: document.getElementById("controls"),
+  seed: document.getElementById("seed"),
+  ablate: document.getElementById("ablate"),
+  button: document.getElementById("run"),
+  error: document.getElementById("error"),
+  list: document.getElementById("runs"),
+  count: document.getElementById("count"),
+  mean: document.getElementById("mean"),
+  coverage: document.getElementById("coverage"),
+};
+
+const percent = (fraction) => `${(fraction * 100).toFixed(2)} %`;
+const watts = (value) => `${Number(value).toPrecision(5)} W/m²`;
+
+function runOf(id) {
+  if (!runs.has(id)) {
+    runs.set(id, { id, stages: [], done: false });
+  }
+  return runs.get(id);
+}
+
+function apply(event) {
+  const run = runOf(event.run_id);
+  const p = event.payload || {};
+
+  switch (event.kind) {
+    case "config_accepted":
+      run.seed = p.seed;
+      run.truth = p.truth_fidelity;
+      run.ablate = p.ablate;
+      run.tier = p.tier;
+      if (p.git_sha) {
+        el.revision.textContent = `${p.git_sha}${p.git_dirty ? " · DIRTY" : ""}`;
+        el.revision.classList.toggle("dirty", Boolean(p.git_dirty));
+      }
+      run.stages.push(`configuration accepted — reported at T${p.tier}`);
+      break;
+    case "truth_solved":
+      run.stages.push(`truth solved on ${p.fidelity}`);
+      break;
+    case "measurements_synthesised":
+      run.contributing = p.contributing || [];
+      run.excluded = p.excluded || [];
+      run.stages.push(`measurements synthesised — ${(p.contributing || []).join(", ")}`);
+      break;
+    case "truth_sealed":
+      run.commitment = p.commitment;
+      run.stages.push(`truth sealed · <span class="digest">${p.commitment.slice(0, 16)}…</span>`);
+      break;
+    case "map_progress":
+      run.solve = p.solve;
+      break;
+    case "estimate_committed":
+      run.estimate = p.gamma_e_estimate_w_per_m2;
+      run.interval = p.interval_w_per_m2;
+      run.converged = p.map_converged;
+      run.stages.push(`estimate committed · <span class="value">${watts(p.gamma_e_estimate_w_per_m2)}</span>`);
+      break;
+    case "seal_opened":
+      run.truthValue = p.gamma_e_true_w_per_m2;
+      run.error = p.relative_error;
+      run.covered = p.truth_within_interval;
+      run.verified = p.commitment_verified;
+      run.stages.push(`seal opened · <span class="value">${watts(p.gamma_e_true_w_per_m2)}</span>`);
+      break;
+    case "row":
+      run.done = true;
+      break;
+    case "run_failed":
+      run.failed = `exited ${p.exit_code}`;
+      run.done = true;
+      break;
+    case "run_timeout":
+      run.failed = `timed out after ${p.timeout_s} s`;
+      run.done = true;
+      break;
+    default:
+      break;
+  }
+}
+
+function verdictOf(run) {
+  if (run.failed) return `<p class="verdict covered-false">run failed — ${run.failed}</p>`;
+  if (run.error === undefined) return "";
+
+  const lines = [`error ${percent(run.error)}`];
+  if (run.interval === null) {
+    lines.push(
+      '<span class="note">no interval — the Laplace Hessian was not positive definite ' +
+        "(doc 05 §6 null space, ADR-012)</span>",
+    );
+  } else if (run.covered === true) {
+    lines.push('<span class="covered-true">COVERED ✓</span>');
+  } else if (run.covered === false) {
+    lines.push('<span class="covered-false">COVERED ✗</span>');
+  }
+  if (run.converged === false) {
+    lines.push('<span class="covered-false">MAP did not converge</span>');
+  }
+  if (run.verified === true) {
+    lines.push('<span class="note">commitment verified against the revealed value</span>');
+  }
+  if (run.excluded && run.excluded.length) {
+    lines.push(`<span class="note">excluded: ${run.excluded.join(", ")}</span>`);
+  }
+  return `<p class="verdict">${lines.join("<br />")}</p>`;
+}
+
+function render() {
+  const ordered = [...runs.values()].reverse();
+  el.list.innerHTML = ordered
+    .map((run) => {
+      const live = !run.done;
+      const heading = `#${run.id} · seed ${run.seed ?? "?"} · ${run.truth ?? "?"} truth${
+        run.ablate ? ` · dropped ${run.ablate}` : ""
+      }`;
+      const solving = live && run.solve ? `<li>inverting… solve ${run.solve}</li>` : "";
+      return `<li class="run${live ? " live" : ""}" data-run="${run.id}">
+        <h2>${heading}</h2>
+        <ul class="stages">${run.stages.map((s) => `<li>${s}</li>`).join("")}${solving}</ul>
+        ${verdictOf(run)}
+      </li>`;
+    })
+    .join("");
+
+  const finished = [...runs.values()].filter((run) => run.error !== undefined);
+  const scored = finished.filter((run) => run.covered !== null && run.covered !== undefined);
+  el.count.textContent = `${finished.length} run${finished.length === 1 ? "" : "s"}`;
+  el.mean.textContent = finished.length
+    ? `mean ${percent(finished.reduce((sum, run) => sum + run.error, 0) / finished.length)}`
+    : "—";
+  el.coverage.textContent = scored.length
+    ? `covered ${scored.filter((run) => run.covered).length}/${scored.length}`
+    : "—";
+}
+
+el.form.addEventListener("submit", async (submitEvent) => {
+  submitEvent.preventDefault();
+  el.error.hidden = true;
+  el.button.disabled = true;
+  try {
+    const body = {
+      seed: Number(el.seed.value),
+      truth: el.form.elements.truth.value,
+      ablate: el.ablate.value || null,
+    };
+    const response = await fetch("/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      el.error.textContent = payload.error || `refused (${response.status})`;
+      el.error.hidden = false;
+    } else if (payload.deduplicated) {
+      el.error.textContent = `already queued as #${payload.run_id} — watch it below.`;
+      el.error.hidden = false;
+    }
+  } catch (failure) {
+    el.error.textContent = `could not reach the server: ${failure}`;
+    el.error.hidden = false;
+  } finally {
+    el.button.disabled = false;
+  }
+});
+
+const stream = new EventSource("/events");
+stream.onmessage = (message) => {
+  apply(JSON.parse(message.data));
+  render();
+};
+stream.onerror = () => {
+  // EventSource reconnects on its own and resumes from Last-Event-ID, so this is a status
+  // line rather than an error path.
+  el.revision.textContent += " · reconnecting…";
+};
+
+fetch("/health")
+  .then((response) => response.json())
+  .then((health) => {
+    if (!runs.size) el.revision.textContent = health.join_url;
+  })
+  .catch(() => {});
+```
+
+- [ ] **Step 4: Add `git_sha` and `git_dirty` to `config_accepted`**
+
+The frontend reads them and `KIND_FIELDS` already permits them, but Task 5's emit omitted
+them. In `worker.py`, capture the revision once at entry and pass it through. Change the
+`run_cell` call in `main` to wrap the writer:
+
+```python
+    from vpl.jury.preflight import git_revision
+
+    sha, dirty = git_revision()
+
+    def emit(event: ProgressEvent) -> None:
+        payload = dict(event.payload)
+        if event.kind == "config_accepted":
+            payload["git_sha"] = sha
+            payload["git_dirty"] = dirty
+        write(ProgressEvent(kind=event.kind, payload=payload))
+
+    write = _writer(events)  # type: ignore[assignment]
+```
+
+and pass `progress=emit`. Keep `_writer` as the raw line writer.
+
+- [ ] **Step 5: Write the smoke tests**
+
+Create `packages/vpl-jury/tests/test_interface.py`:
+
+```python
+"""One smoke test at phone width, and one real T2 run behind the fenicsx marker.
+
+Deliberately no screenshot baselines — see the plan's §10.3 and the design's §10.3. This
+interface will change until the day before the presentation, and baselines would be
+maintenance cost on a surface whose audience is five people.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from vpl.jury.broker import Broker
+from vpl.jury.queue import RunQueue
+from vpl.jury.server import build_app
+from vpl.jury.tape import Tape
+
+PHONE_WIDTH = 375
+PHONE_HEIGHT = 812
+
+
+def _fast_command(request: object) -> list[str]:
+    stages = [
+        {"kind": "config_accepted", "payload": {"seed": 8231, "truth_fidelity": "L0", "tier": 1}},
+        {"kind": "truth_sealed", "payload": {"commitment": "a" * 64}},
+        {"kind": "estimate_committed", "payload": {"gamma_e_estimate_w_per_m2": 9481.0,
+                                                   "interval_w_per_m2": [8912.0, 10082.0],
+                                                   "map_converged": True}},
+        {"kind": "seal_opened", "payload": {"gamma_e_true_w_per_m2": 9398.6,
+                                            "relative_error": 0.00877,
+                                            "truth_within_interval": True,
+                                            "commitment_verified": True}},
+        {"kind": "row", "payload": {"report": "demo"}},
+    ]
+    script = "".join(f"print({json.dumps(json.dumps(stage))});" for stage in stages)
+    return [sys.executable, "-c", script]
+
+
+@pytest.fixture
+def live_server(tmp_path: Path):
+    uvicorn = pytest.importorskip("uvicorn")
+    import asyncio
+    import threading
+
+    tape = Tape(tmp_path / "tape.jsonl")
+    broker = Broker()
+    queue = RunQueue(tape, publish=broker.publish, command=_fast_command)  # type: ignore[arg-type]
+    app = build_app(tape=tape, queue=queue, broker=broker, join_url="http://127.0.0.1:8111")
+
+    async def _main() -> None:
+        worker = asyncio.create_task(queue.run_forever())
+        config = uvicorn.Config(app, host="127.0.0.1", port=8111, log_level="error")
+        server = uvicorn.Server(config)
+        await server.serve()
+        await queue.stop()
+        await worker
+
+    loop_thread = threading.Thread(target=lambda: asyncio.run(_main()), daemon=True)
+    loop_thread.start()
+    import time
+
+    for _ in range(50):
+        try:
+            import httpx
+
+            httpx.get("http://127.0.0.1:8111/health", timeout=0.2)
+            break
+        except Exception:  # noqa: BLE001 - polling for readiness
+            time.sleep(0.1)
+    yield "http://127.0.0.1:8111"
+
+
+class TestThePhoneJourney:
+    def test_a_juror_can_submit_a_seed_and_see_the_reveal(self, live_server: str) -> None:
+        playwright = pytest.importorskip("playwright.sync_api")
+
+        with playwright.sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(
+                viewport={"width": PHONE_WIDTH, "height": PHONE_HEIGHT}
+            )
+            page.goto(live_server)
+
+            page.fill("#seed", "8231")
+            page.click("#run")
+
+            page.wait_for_selector("text=seal opened", timeout=30_000)
+            assert "COVERED" in page.inner_text("#runs")
+            assert page.inner_text("#count").startswith("1 run")
+
+            browser.close()
+
+    def test_nothing_overflows_at_phone_width(self, live_server: str) -> None:
+        playwright = pytest.importorskip("playwright.sync_api")
+
+        with playwright.sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(
+                viewport={"width": PHONE_WIDTH, "height": PHONE_HEIGHT}
+            )
+            page.goto(live_server)
+
+            overflow = page.evaluate(
+                "() => document.documentElement.scrollWidth > window.innerWidth"
+            )
+
+            assert overflow is False
+            browser.close()
+
+
+@pytest.mark.fenicsx
+@pytest.mark.slow
+class TestTheHeadlineRunEndToEnd:
+    def test_an_l1_truth_run_completes_through_the_worker(self) -> None:
+        # The one test that exercises the actual T2 path the demo quotes. Needs dolfinx, so
+        # it is marked and skipped in the workspace environment.
+        pytest.importorskip("dolfinx")
+        import subprocess
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "vpl.jury.worker",
+                json.dumps({"seed": 0, "truth": "L1", "ablate": "oes"}),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=True,
+        )
+
+        kinds = [json.loads(line)["kind"] for line in completed.stdout.splitlines()]
+        revealed = next(
+            json.loads(line)
+            for line in completed.stdout.splitlines()
+            if json.loads(line)["kind"] == "seal_opened"
+        )
+
+        assert "seal_opened" in kinds
+        assert revealed["payload"]["tier"] == 2
+        assert revealed["payload"]["commitment_verified"] is True
+```
+
+Add to the dev dependency group in the root `pyproject.toml`:
+
+```toml
+    "playwright>=1.48",
+```
+
+- [ ] **Step 6: Install the browser and run the tests**
+
+```bash
+uv run playwright install chromium
+uv run pytest packages/vpl-jury/tests/test_interface.py -v -m "not fenicsx"
+```
+Expected: 2 passed.
+
+- [ ] **Step 7: Run the T2 end-to-end case in the real environment**
+
+```bash
+micromamba run -n vpl-t2 env PYTHONPATH=packages/vpl-core/src:packages/vpl-physics/src:packages/vpl-validation/src:packages/vpl-instruments/src:packages/vpl-inverse/src:packages/vpl-experiment/src:packages/vpl-jury/src \
+  python -m pytest packages/vpl-jury/tests/test_interface.py -v -m fenicsx
+```
+Expected: 1 passed, in roughly 30 s.
+
+- [ ] **Step 8: Verify and commit**
+
+```bash
+uv run ruff check packages/vpl-jury && uv run mypy packages/vpl-jury
+git add packages/vpl-jury pyproject.toml uv.lock
+git commit -m "feat(jury): the interface
+
+One EventSource, one render function, no framework and no build step. Every
+run is rebuilt from the events it received rather than from local state, so
+a run's appearance and its record cannot disagree — there is only one of them.
+
+System font stack rather than a vendored file: zero bytes over the hotspot
+and nothing to ship. 16px inputs so iOS does not zoom on focus, 44px touch
+targets, and no screenshot baselines — this will change until the day
+before, and baselines would be maintenance cost on a five-person audience."
+```
+
+---
+
+## Final self-review
+
+**1. Spec coverage.** Every section of the design maps to a task:
+
+| Design section | Task |
 |---|---|
-| 14 | Frontend (`index.html`, `app.js`, `app.css`) + Playwright smoke at 375 px + `fenicsx`-marked L1 smoke |
+| §4.1 `run_cell(progress=)` | 5 |
+| §4.1 `SealedTruth.commitment()` | 3 |
+| §4.2 `events.py` | 4 (type relocated to `vpl-core` in Task 2 — documented) |
+| §4.2 `tape.py` | 7 |
+| §4.2 `worker.py` | 8 |
+| §4.2 `queue.py` | 10 |
+| §4.2 `server.py` | 11b (+ `broker.py` in 11a) |
+| §4.2 `verify.py` | 12 |
+| §4.2 `preflight.py` | 13 (+ `serve.py`) |
+| §4.2 `static/` | 14 |
+| §4.3 environment | 1 (recipe), 8/13/14 (T2 verification steps) |
+| §5 stage events | 4 (declared), 5 (emitted) |
+| §6 data flow | 10, 11a, 11b |
+| §7 legs 1–3 | 9 (1 and 2), 12 (3) |
+| §7.1 stated limits | 3 (docstring), 13 (`revision` check), 14 (`.dirty` display) |
+| §8 interface | 14 |
+| §9.1 results not errors | 14 (`verdictOf`) |
+| §9.2 genuine errors | 6 (422), 10 (429/crash/timeout), 13 (tape abort) |
+| §9.3 re-runs | 10 |
+| §9.4 preflight | 13 |
+| §10.1 the two critical tests | 5 (inertness), 4 + 5 + 9 (no leak) |
+| §10.2 the rest | 4, 7, 8, 10, 11a, 11b, 12 |
+| §10.3 deviation | 14 |
+
+**2. Placeholder scan.** No "TBD", no "add error handling", no "similar to Task N". Every code
+step carries the content; every run step carries the command and the expected result.
+
+**3. Type consistency — checked across task boundaries:**
+
+- `ProgressEvent(kind, payload)` — defined Task 2, used Tasks 4, 5, 7, 8, 10, 12.
+- `validate` — Task 4, used Tasks 5, 7, 8.
+- `TapeEvent.to_json` / `from_json` — Task 4, used Tasks 7, 9, 11a, 11b.
+- `Tape.append(run_id, event)` / `read_all()` / `next_run_id()` — Task 7, used Tasks 9, 10, 11b, 12, 13.
+- `RunRequest.parse` / `to_cell` / `fingerprint` — Task 6, used Tasks 8, 10, 11b.
+- `RunQueue(tape, publish=, max_pending=, timeout_s=, command=)` — Task 10, constructed identically in Tasks 11b, 13, 14.
+- `Broker.publish` / `subscribe` / `subscriber_count` — Task 11a, used Tasks 11b, 13, 14.
+- `build_app(tape=, queue=, broker=, join_url=)` — Task 11b, called with those keywords in Tasks 13, 14.
+- `truth_gamma_e(cell, *, seed, registry=None)` — Task 12, used in Task 12's test.
+- `Check(name, ok, detail)` / `run_preflight` / `report` / `git_revision` / `lan_address` — Task 13, and `git_revision` is imported by Task 14 Step 4.
+
+**Three issues found and fixed inline while reviewing:**
+
+1. Task 14's frontend reads `git_sha` and `git_dirty` from `config_accepted`, which Task 5
+   never emitted. Fixed by adding Task 14 Step 4 rather than editing Task 5, because Task 5
+   ships before the frontend exists and its own tests do not need the fields.
+2. Task 12's `cli.py` imports `vpl.jury.serve`, which Task 13 creates — so Task 12's `serve`
+   subcommand is unusable until Task 13 lands. Acceptable and recorded: the import is inside
+   the branch, so `verify` and `preflight` work regardless, and Task 12's tests exercise only
+   `verify_run`.
+3. `queue.py`'s `_record` catches `TapeWriteError` only to re-raise it. Left as written: the
+   `try`/`raise` is load-bearing documentation of a decision that would otherwise look like an
+   oversight, and design §9.2 requires the failure to stop the run rather than be swallowed.
+
+**One thing deliberately not in any task.** Design §12 item 2 asked whether `commitment()`
+should take a salt. Task 3 settles it as no salt, documented in the method's `Note:`, because
+a salt would make the digest unreproducible from the seed alone and leg 3 depends on exactly
+that reproducibility.
 | 14 | Frontend (`index.html`, `app.js`, `app.css`) + Playwright smoke at 375 px + `fenicsx`-marked L1 smoke |
 | 12 | `verify.py` + `cli.py` — re-derive truth from seed in a fresh process, compare digest, detect tampering |
 | 13 | `preflight.py` — git SHA/dirty, dolfinx detection, LAN IP, QR, disk check, seed-0 self-test |
