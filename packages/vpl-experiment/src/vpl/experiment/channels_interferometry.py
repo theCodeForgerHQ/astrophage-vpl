@@ -51,32 +51,47 @@ must not be allowed to over-weight it." A diagnostic with no z-resolution was ne
 sampler to begin with; the 8-chord ladder against a 2.28 mm sheath-scale grid was the wrong
 model for what doc 02 §8.3 itself already describes.
 
-## What this module measures instead: the bulk density, once
+## What this module measures instead: the bulk density, integrated once (revised, Block F)
 
 In real laboratory practice a line-integrated interferometer is a **bulk-plasma**
 diagnostic. The sheath is thin (0.89 mm at RP-1, doc 02 §3.3) and electron-depleted —
 precisely where the electrons this channel is sensitive to are *not* — so a real beam
 crossing the discharge picks up almost none of its phase from the sheath and almost all of
-it from the bulk. What experimentalists actually do with a chord interferometer on a device
-like this is use it to measure the bulk density ``n_0`` and feed that in as the boundary
-condition a sheath model needs, not to try to resolve the sheath with it. That is exactly
-what doc 02 §8.3's "constrains the boundary condition... not the sheath" already says, and
-it is good news independently of the grid-mismatch finding above: ``n_0`` is one of the two
-parameters doc 05 §2.1 is inferring, and it is the one the 6 % OES calibration uncertainty
-makes unidentifiable on its own (see the section above).
+it from the bulk. That is exactly what doc 02 §8.3's "constrains the boundary condition...
+not the sheath" already says, and it motivates measuring one number, not eight — the
+8-chord-ladder-to-one-line-integral reframing above is unchanged by what follows.
 
-So :class:`_BulkInterferometer` below reports **one** phase per acquisition,
+**What did change (recovery plan, defect #2, "Block F"): the density source.** The version
+of this module that shipped after the reframing above read ``state.params.n_0`` — the
+solver's own *boundary-condition parameter* — rather than the ``n_e`` field the solver
+actually computed. That was measured to be a genuine bug, not a simplification: it made
+this channel provably blind to the density field. Halving ``state.field("n_e")`` while
+leaving ``n_0`` untouched changed this channel's reading by exactly zero bits, and a
+model-discrepancy estimator built to compare this channel's prediction against a truth's
+own field measured that divergence as identically zero on every draw, because neither side
+of that comparison had ever touched the field. See
+``TestObservableReadsTheFieldNotJustTheParameter.
+test_halving_the_n_e_field_materially_changes_the_reading`` in
+``test_channels_interferometry.py`` for the checked regression.
 
-    Delta phi = r_e lambda n_0 L,
+:class:`_BulkInterferometer` now computes a genuine chord-averaged line integral,
+:meth:`~_BulkInterferometer._line_averaged_density_per_m3`, from ``state.field("n_e")`` and
+``state.grid``, in two pieces:
 
-:func:`~vpl.instruments.interferometry.phase.net_phase_shift_rad` evaluated with
-``n_e_per_m3 = state.params.n_0_per_m3`` (the bulk density the solver treats as a boundary
-condition — :class:`~vpl.core.state.PlasmaParams`'s own docstring calls ``n_0`` "bulk plasma
-density") in place of the old ``np.interp`` sample of the ``n_e(z)`` field. The neutral-gas
-correction (doc 04 §5.2) is unchanged: ``state.params.n_g_per_m3`` never depended on the
-chord ladder either. Nothing here samples ``state.grid`` or ``state.field("n_e")`` at all —
-the observable this module now returns cannot inherit a grid-domain mismatch with a solver's
-spatial grid, because it never touches that grid.
+1. A trapezoidal quadrature (:func:`numpy.trapezoid`) of the solver's own ``n_e(z)`` over
+   the resolved near-wall domain (``state.grid.z_m`` — two sheath thicknesses at RP-1,
+   z = 0 to 2.28 mm, doc 02 §3.3).
+2. The unresolved remainder of the 400 mm chord, held at the resolved domain's own
+   outermost (bulk-most, least-depleted) sample, ``n_e(z_max)`` — the best density estimate
+   this project's 1-D sheath-normal solvers have for anything past the point they actually
+   resolve.
+
+That chord average is what feeds
+:func:`~vpl.instruments.interferometry.phase.net_phase_shift_rad` as ``n_e_per_m3`` —
+algebraically identical to the formula's existing "uniform density times chord length"
+structure, just fed a genuine average instead of a parameter. The neutral-gas correction
+(doc 04 §5.2) is unchanged: ``state.params.n_g_per_m3`` never depended on either the old
+chord ladder or the ``n_0`` parameter read.
 
 **The chord length is machine geometry, not a fitted number.** ``L`` is
 :data:`~vpl.instruments.interferometry.phase.CHAMBER_DIAMETER_M`, the 400 mm chamber
@@ -87,51 +102,52 @@ that module's docstring). It is a ``Final`` constant in the unedited
 this module reads it, it does not choose it. There is nothing else in doc 02 §8 for a chord
 length to be; a beam crossing a cylindrical chamber travels the chamber's own diameter.
 
-## The uniformity assumption — stated plainly, because it is the honest cost of the reframing
+## The bulk-extension assumption — stated plainly, and now expected to cost accuracy
 
-Reporting ``r_e lambda n_0 L`` assumes the beam's line of sight sees a density equal to the
-reported bulk value **uniformly** along the whole chord. Two separate uniformity assumptions
-stack here, and only one of them is new to this module:
+Reporting the line-averaged density above still assumes the unresolved remainder of the
+chord sees a uniform density, and now states explicitly which density that is: the
+resolved domain's own edge sample, not the undepleted parameter ``n_0``.
 
 1. **Transverse uniformity along the beam's own path** was already assumed by the
-   (unedited) :func:`~vpl.instruments.interferometry.phase.electron_phase_shift_rad`: its own
-   docstring states plainly that ``INTEGRAL n_e dl`` "collapses to ``n_e L``" because "the
-   plasma solver this project carries is one-dimensional in the sheath-normal coordinate
-   ``z`` and has no information about how density varies along the chord's own axis". This
-   module inherits that assumption unchanged; it did not introduce it.
-2. **This module adds**: that the density along that path equals the single reported bulk
-   number ``n_0``, rather than some non-uniform value a real beam crossing a real,
-   imperfectly-uniform bulk plasma would actually integrate. A real discharge has genuine
-   density gradients across its bulk — radial ambipolar-diffusion profiles toward the
-   chamber walls, azimuthal asymmetry from feed geometry, and (in a magnetized device) ExB
-   structure — and a 1-D sheath-normal solver carries no information about any of them, so
-   there is no better number available to integrate against than the boundary condition it
-   was given.
+   (unedited) :func:`~vpl.instruments.interferometry.phase.electron_phase_shift_rad`: its
+   own docstring states plainly that ``INTEGRAL n_e dl`` "collapses to ``n_e L``" for any
+   single density fed to it, because the plasma solvers this project carries are
+   one-dimensional in the sheath-normal coordinate ``z`` and have no information about how
+   density varies along the chord's own transverse axis. This module inherits that
+   assumption unchanged.
+2. **The genuinely new cost**: the resolved domain (``_DOMAIN_SHEATHS = 2.0`` in
+   ``vpl.experiment.closed_loop``) is sized to resolve the *sheath*, not to reach
+   field-free bulk plasma — its outermost sample is the **presheath edge** density,
+   ``n_s = h_l n_0`` (doc 03 §2.1's Godyak ratio, nominally 0.61 —
+   :mod:`vpl.physics.analytic.sheath`'s module docstring), not the undepleted bulk value
+   ``n_0`` a beam genuinely far from the wall would see. Extending that edge sample across
+   the remaining ~99 % of the 400 mm chord therefore carries roughly 39 % of presheath
+   depletion across nearly the whole chord, instead of recovering ``n_0`` exactly the way
+   reading the parameter did by construction.
 
-**This is a genuine model-error term, not a free lunch**, and it is a different, smaller
-thing than the AOM/path-length calibration uncertainty this module already carries: the
-calibration uncertainty is about how precisely the instrument's own phase-to-density scale
-is known; the uniformity assumption is about whether the plasma the beam actually crosses
-looks like the single number the solver reports for it. Nothing here attempts to quantify or
-correct the uniformity error — doing so honestly would need a bulk density model with a real
-radial or azimuthal profile, which this project's 1-D sheath solvers do not have. It is
-recorded here rather than folded silently into
-:data:`~vpl.core.params.default_registry`'s ``IF.phase_scale_uncertainty``, because
-conflating a plasma-uniformity approximation with an instrument calibration figure would
-misattribute the error to the wrong physical cause the next time either number needs
-retiring.
+**This is why Block F is expected to make this channel's reading — and any fused result
+that leans on it — measurably worse, not better**, and why that is the correct outcome
+rather than a regression to fix away: the previous behaviour was right for the wrong
+reason (both sides of the inverse problem read the identical scalar, so they could never
+disagree about it), and this behaviour is a real, checkable computation off a field a
+truth and a trial can genuinely disagree about — including, now, disagreeing for reasons
+(presheath depletion baked into where the grid stops) that have nothing to do with either
+side being "wrong" about ``n_0`` at all. Nothing here attempts to correct that depletion
+bias — doing so honestly would need either a bulk-reaching grid or a stated presheath
+model to extrapolate through, and inventing one to make this channel's numbers look better
+would be exactly the parameter fog doc 00 §6 warns against.
 
 ## Is this an inverse crime? Doc 05 §7's sense, checked rather than assumed
 
 Doc 05 §7 names the inverse crime as *the same model and discretisation* generating and
 inverting synthetic data, so a numerical error the model makes is invisible because both
 sides make it identically. That is not what is happening here, and the reason is that the
-physics genuinely is this simple: a beam crossing a roughly uniform bulk plasma over a known
-length picks up a phase that is *exactly* linear in the density it crosses (doc 04 §5.1's
+physics genuinely is this simple: a beam crossing a chord of known length picks up a phase
+that is *exactly* linear in the average density it crosses (doc 04 §5.1's
 ``r_e lambda n_e L``, not a discretised numerical solve of anything), and truth and
 inversion agree about that relationship for the same reason two calculators agree that
 ``2 * 2 = 4`` — because reality agrees about it, not because the harness is marking its own
-homework. Three places this module could plausibly hide a crime, checked directly:
+homework. Four places this module could plausibly hide a crime, checked directly:
 
 - **The chord length and wavelength are shared, unrandomised constants on both sides.** Is
   that a crime? No: doc 02 §8.2 states both as fixed hardware specifications (a machined
@@ -141,13 +157,13 @@ homework. Three places this module could plausibly hide a crime, checked directl
   sharing a genuinely fixed, non-uncertain constant between the state that generates data and
   the model that inverts it is not committing the doc 05 §7 crime; it is correctly modelling
   a quantity that has no meaningful uncertainty to disagree about.
-- **``n_0`` differs between the truth state and a trial state**, and the phase this module
-  predicts is a strictly monotonic (in fact exactly linear) function of it. So truth and
-  inversion *can* and routinely *do* disagree — that disagreement is the entire likelihood
-  signal :class:`TestDensitySensitivityAndTemperatureBlindness` in
-  ``test_channels_interferometry.py`` measures. There is no degenerate case where two
-  different ``n_0`` values produce the same predicted phase, so there is no path by which
-  this channel is structurally unable to distinguish a wrong trial from the truth.
+- **``n_e``'s field values differ between the truth state and a trial state**, and the
+  reported phase is a strictly monotonic function of the resulting chord average. So truth
+  and inversion *can* and routinely *do* disagree — that disagreement is the entire
+  likelihood signal :class:`TestDensitySensitivityAndTemperatureBlindness` in
+  ``test_channels_interferometry.py`` measures, and it is now a disagreement about a field,
+  not just a scalar (see the paragraph below on why that distinction matters for an L2
+  truth).
 - **The calibration draw and noise are genuinely one-sided**: :meth:`_BulkInterferometer.
   calibrate` draws a random phase-scale estimate only on the truth-side instrument (doc 04
   §7.3's chain); the inversion-side instrument always calls
@@ -156,10 +172,50 @@ homework. Three places this module could plausibly hide a crime, checked directl
   can score it as a systematic — see :class:`InterferometryChannel`'s own docstring. The two
   sides read different random draws from different :class:`~vpl.core.random.Stream` objects,
   never the same number.
+- **The averaging formula itself (trapezoid over the resolved domain, then hold the edge
+  value) is shared, unrandomised code on both sides.** Is *that* a crime? Argued below, in
+  its own section, because the answer is different depending on which fidelity level
+  produced the truth, and the pre-Block-F version of this docstring did not distinguish
+  them.
 
-So the honest residual here is the uniformity assumption above — smaller than, and different
-in kind from, the doc 05 §7 crime, and it is stated rather than hidden inside a covariance
-that happens to look tight.
+## Why sharing the averaging formula is not a crime for L0/L1 truths, but an L2 truth differs
+
+The pre-Block-F version of this argument stopped at "``n_0`` differs between the truth and
+a trial, so truth and inversion can disagree" and treated that as settling the question.
+It does settle it for **L0 and L1 truths**: those levels are generated by the same closed
+family of equations (Boltzmann electrons over an analytically or numerically solved
+potential profile) that the inversion's own forward model assumes, so a truth ``n_e(z)``
+and a trial ``n_e(z)`` built from different ``theta`` values disagree for the ordinary,
+intended reason — different parameters, same equations — and the averaging formula reduces
+that disagreement to a phase difference without adding or hiding an error either state's
+own solver did not already make on its own terms. Two states from the *same* solver family
+computing the *same* line-integral formula over their own two different fields is not the
+doc 05 §7 crime; it is the correctly-modelled case doc 05 §7 was always written to permit.
+
+**It is not obviously sound for an L2 (particle) truth, and this docstring did not say so
+before Block F.** An L2 state's ``n_e(z)`` comes from a kinetic/particle solver that need
+not obey the Boltzmann relation ``n_e = n_s exp(Phi / T_e)`` the L0/L1 forward model
+assumes at all — non-Maxwellian tails, finite-sampling noise, and genuine kinetic
+structure near the sheath edge can all put an L2 truth's actual field somewhere the
+inversion's own model family cannot reach for *any* choice of ``theta``. Before Block F,
+none of that mattered to this channel, because both the L2 truth and every trial
+collapsed onto the identical ``theta.n_0`` scalar the moment ``_predict`` ran — the
+particle solver's own field, and however it disagreed with the Boltzmann assumption, was
+computed and then discarded unread. That is precisely the failure mode this docstring's
+"is this an inverse crime" section could not have ruled out for L2, because it never
+described a code path where an L2 truth's field was read at all: an argument that the
+*parameter* comparison was fair said nothing about whether the *field* comparison — the
+one this channel now actually performs — is equally fair, and it is not guaranteed to be.
+What Block F buys is not a proof that this channel is unbiased against an L2 truth; it is
+that the channel is now capable of being *wrong about* an L2 truth in a way a discrepancy
+estimator can measure, rather than structurally incapable of seeing the disagreement at
+all. See the recovery plan's Block G for the companion effort on characterising that
+model-discrepancy term from real solver output rather than assuming it away.
+
+So the honest residual here is the bulk-extension assumption above plus, for an L2 truth
+specifically, the open question this section states rather than resolves — smaller in
+scope than, and different in kind from, the doc 05 §7 crime, and recorded here rather than
+hidden inside a covariance that happens to look tight.
 
 ## Scoring the calibration coherently — doc 11 §9's amendment, doc 06 §4.1
 
@@ -321,18 +377,21 @@ def interferometry_acquisition_window(registry: ParameterRegistry) -> Acquisitio
 
 class _BulkInterferometer:
     """A single line-of-sight phase measurement of the bulk density — see the module
-    docstring for the physics, the chord-length sourcing and the uniformity assumption this
-    trades the old 8-chord sheath sampler for.
+    docstring for the physics, the chord-length sourcing and the bulk-extension assumption
+    (Block F) this trades the old 8-chord sheath sampler, and then the ``n_0``-parameter
+    read, for.
 
     Deliberately does not delegate to
     :class:`~vpl.instruments.interferometry.instrument.InterferometryInstrument`: that
-    class's ``_predict`` interpolates a solver's ``n_e(z)`` field onto a chord ladder, which
-    is precisely the sheath-sampling behaviour this reframing replaces, and it is not this
-    module's file to edit. This class reuses the same *physics primitives*
-    (:func:`~vpl.instruments.interferometry.phase.net_phase_shift_rad`, the doc 02 §8.2
-    hardware constants, the doc 04 §5.2 vibration and fringe-jump noise models, and
-    :mod:`vpl.instruments.coherent`'s shared Woodbury kernel) with a different binding from
-    state to density.
+    class's ``_predict`` interpolates a solver's ``n_e(z)`` field onto an 8-position chord
+    ladder, which is precisely the sheath-sampling behaviour the original reframing
+    replaced, and it is not this module's file to edit. This class reuses the same
+    *physics primitives* (:func:`~vpl.instruments.interferometry.phase.net_phase_shift_rad`,
+    the doc 02 §8.2 hardware constants, the doc 04 §5.2 vibration and fringe-jump noise
+    models, and :mod:`vpl.instruments.coherent`'s shared Woodbury kernel) with a different
+    binding from state to density — post-Block-F, a chord-averaged integral of
+    ``state.field("n_e")`` (:meth:`_line_averaged_density_per_m3`), not a single chord
+    ladder and not the ``state.params.n_0`` scalar either.
 
     Mutable for the same reason
     :class:`~vpl.instruments.interferometry.instrument.InterferometryInstrument` is:
@@ -426,10 +485,15 @@ class _BulkInterferometer:
     def forward(self, state: PlasmaState, w: AcquisitionWindow) -> Observable:
         """The noiseless phase the likelihood compares against — doc 04 §9.
 
-        Reads only ``state.params`` — never ``state.grid`` or ``state.field("n_e")`` — so
-        this cannot inherit the grid-domain mismatch the module docstring's "measured
-        finding" section describes; there is no grid here for a chord ladder to fall past
-        the edge of.
+        Post-Block-F: reads ``state.grid`` and ``state.field("n_e")`` through
+        :meth:`_line_averaged_density_per_m3`, not ``state.params.n_0`` — see the module
+        docstring's "what this module measures instead" section for why, and its
+        "bulk-extension assumption" section for the honest cost of doing so. This does
+        *not* reintroduce the old 8-chord ladder's grid-domain mismatch (the "measured
+        finding" section, still accurate for the pre-reframing history it describes):
+        there is still exactly one chord and one reported value, and the resolved grid is
+        used as a genuine average over its own domain rather than sampled at positions
+        that can fall past its edge.
         """
         return Observable(
             instrument_id=self.instrument_id,
@@ -441,14 +505,15 @@ class _BulkInterferometer:
     def _predict(self, state: PlasmaState) -> FloatArray:
         """The bulk-density line integral both :meth:`forward` and :meth:`observe` share.
 
-        ``n_0`` is a scalar control parameter (:class:`~vpl.core.state.PlasmaParams` has no
-        time axis for it, unlike the old chord ladder's time-averaged field sample), so
-        there is no acquisition-window integration to perform here at all — a further
-        simplification the reframing buys, not one imposed on it.
+        Genuinely integrates :meth:`_line_averaged_density_per_m3`'s reading of
+        ``state.field("n_e")`` over the chord — see that method and the module
+        docstring's "what this module measures instead" section (post-Block-F revision)
+        for why this reads the field rather than ``state.params.n_0`` and what that
+        change costs.
         """
         predicted = np.asarray(
             net_phase_shift_rad(
-                n_e_per_m3=state.params.n_0_per_m3,
+                n_e_per_m3=self._line_averaged_density_per_m3(state),
                 n_neutral_per_m3=state.params.n_g_per_m3,
                 wavelength_m=self._wavelength_m,
                 chord_length_m=self._chord_length_m,
@@ -460,6 +525,70 @@ class _BulkInterferometer:
             "value — see _N_SAMPLES"
         )
         return predicted
+
+    def _line_averaged_density_per_m3(self, state: PlasmaState) -> float:
+        """The chord-averaged density a genuine line integral over ``n_e(z)`` implies.
+
+        Block F (doc: 2026-08-07 recovery plan, defect #2): the previous version of this
+        method never read ``state.field("n_e")`` at all — it read ``state.params.n_0``, a
+        scalar control parameter, so halving the *field* changed this channel's reading by
+        zero bits, and a discrepancy estimator built to measure how far this channel's model
+        diverges from a truth's own field measured that divergence as exactly zero, always,
+        by construction. That is the doc 05 §7 inverse crime the module docstring's "is this
+        an inverse crime" section argued against for the *parameter* ``n_0`` and was correct
+        to: two independently drawn ``n_0`` scalars really do disagree. It did not
+        contemplate a truth whose ``n_0`` and whose actual ``n_e`` field disagree with each
+        other — which is exactly what an L2 (particle) truth can produce, and what a
+        discrepancy sweep exists to characterise. Reading the parameter made that
+        disagreement structurally invisible to this channel.
+
+        This method instead computes ``(1 / L) INTEGRAL n_e dl`` over the physical chord,
+        in two pieces:
+
+        1. **The resolved near-wall domain** (``state.grid.z_m``, doc 02 §2's sheath-normal
+           coordinate — two sheath thicknesses at RP-1, doc 02 §3.3): a trapezoidal
+           quadrature of the solver's own ``n_e(z)`` samples, via :func:`numpy.trapezoid`.
+        2. **The unresolved remainder** of the chord (``chord_length_m`` minus the resolved
+           domain's own length — at RP-1, ~99.4 % of the 400 mm chamber diameter): no 1-D
+           sheath-normal solver this project carries has anything to say about density that
+           far from the wall, so this method holds it at the resolved domain's own outermost
+           (bulk-most) sample, ``n_e(z_max)`` — the least-depleted density the solver
+           actually computed, and the same "extend the last resolved value" convention
+           :func:`numpy.interp`'s clamping already used for the old chord ladder, applied
+           deliberately here rather than as :func:`numpy.interp`'s incidental edge behaviour.
+
+        **The honest cost, stated plainly.** ``n_e(z_max)`` is the presheath-*edge* density
+        ``h_l n_0`` (doc 03 §2.1's Godyak ratio, 0.61 nominal — see
+        :mod:`vpl.physics.analytic.sheath`'s module docstring), not the undepleted bulk
+        value ``n_0`` a beam far from any wall would actually cross. The resolved domain
+        stops at the presheath edge by construction (``_DOMAIN_SHEATHS = 2.0`` in
+        ``vpl.experiment.closed_loop``) — it was sized to resolve the sheath, not to reach
+        genuinely field-free bulk — so extending with its own edge sample carries that
+        ~39 % presheath depletion across the remaining 99+% of the chord instead of
+        recovering the truly uniform ``n_0`` the old parameter read reported by
+        construction. That is why this reframing is expected to make this channel's
+        reading, and therefore fusion results that lean on it, **worse**, not better: it
+        trades a value that was right by construction (because both sides of the inverse
+        problem read the same scalar) for one that is a real, checkable computation off a
+        field that a truth and a trial can genuinely disagree about — including, now, in
+        the L0/L1 configurations that do not need that disagreement to expose the bias
+        already sitting in ``h_l``.
+        """
+        z_m = state.grid.z_m
+        n_e_per_m3 = np.asarray(state.field("n_e").values, dtype=np.float64)
+        resolved_length_m = float(z_m[-1] - z_m[0])
+        remainder_length_m = self._chord_length_m - resolved_length_m
+        if remainder_length_m < 0.0:
+            raise ValueError(
+                f"the resolved grid ({resolved_length_m:.4g} m) is longer than the "
+                f"{self._chord_length_m:.4g} m chord; the bulk-extension approximation in "
+                f"{type(self).__name__}._line_averaged_density_per_m3 assumes the grid is "
+                "a near-wall subset of the full chord, not the whole of it."
+            )
+        resolved_integral = float(np.trapezoid(n_e_per_m3, z_m))
+        bulk_edge_density_per_m3 = float(n_e_per_m3[-1])
+        total_integral = resolved_integral + bulk_edge_density_per_m3 * remainder_length_m
+        return total_integral / self._chord_length_m
 
     def observe(self, state: PlasmaState, w: AcquisitionWindow) -> Measurement:
         """A noisy, imperfectly-calibrated phase — doc 04 §9.

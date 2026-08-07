@@ -3,11 +3,17 @@ doc 05 §3.2, doc 02 §8.3, doc 11 §9 item 3.
 
 This channel was reframed from an 8-chord sheath sampler to a single bulk-density line
 integral (see the module docstring under test for the full finding and the reasoning).
-Four things this file exists to pin down, each a claim the module docstring states in
-prose:
+Block F (recovery plan defect #2) then reframed it a second time: the bulk-line-integral
+version read ``state.params.n_0`` instead of ``state.field("n_e")``, which made it
+provably blind to the density field — halving ``n_e`` moved this channel's reading by
+zero bits, and a model-discrepancy estimator built to compare this channel's prediction
+against a truth's own field measured that divergence as exactly zero, always, because the
+two sides never touched the field at all. Five things this file exists to pin down, each a
+claim the module docstring states in prose:
 
-1. The observable tracks ``n_0`` and is blind to the sheath's own shape —
-   ``TestObservableIsABulkMeasurementNotASheathSample`` and
+1. The observable is now a genuine, checkable function of ``state.field("n_e")`` — not
+   just of the ``n_0`` scalar — and is no longer blind to the sheath's own shape at fixed
+   ``n_0``: ``TestObservableReadsTheFieldNotJustTheParameter`` and
    ``TestDensitySensitivityAndTemperatureBlindness``.
 2. The doc 01 IF-6 detection floor still gates the channel off at low density —
    ``TestDetectionFloorStillGates`` and
@@ -18,17 +24,20 @@ prose:
 4. ``calibration_uncertainty`` (Task 3's amendment) still reaches the instrument through
    :class:`~vpl.inverse.fusion.JointLikelihood`'s fixed two-positional-argument call shape
    — ``TestCalibrationUncertaintyAdapter``.
+5. ``forward`` never raises across the MAP search region even though it now reads a real
+   field rather than a single scalar — ``TestForwardNeverRaisesAcrossTheMapSearchRegion``.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
 import pytest
 
 from vpl.core.params import default_registry
-from vpl.core.state import Measurement, PlasmaState
+from vpl.core.state import Measurement, PlasmaState, ScalarField
 from vpl.core.units import magnitude_in
 from vpl.experiment.channels_interferometry import (
     INTERFEROMETRY_CHANNEL,
@@ -61,7 +70,7 @@ _OPERATING_BIAS_V = -100.0
 
 #: A wall bias far from ``_OPERATING_BIAS_V`` (RP-1's own reference point), used only to
 #: force a materially different sheath structure while holding ``n_0`` fixed — see
-#: ``TestObservableIsABulkMeasurementNotASheathSample``.
+#: ``TestObservableReadsTheFieldNotJustTheParameter``.
 _ALTERNATE_BIAS_V = -250.0
 
 
@@ -243,17 +252,21 @@ class TestChordGeometryDoesNotDependOnTheta:
         assert before == after
 
 
-class TestObservableIsABulkMeasurementNotASheathSample:
-    """The finding that motivated the reframing: against the closed loop's 0-2.28 mm
-    observation grid, the old 8-chord-at-5-mm ladder put seven of its eight chords past the
-    grid's edge, where ``np.interp`` clamped them to the outermost node's density — "eight
-    independent line integrals" degenerating into one interior reading plus seven repeats
-    of the same clamped value. That pathology cannot recur here: the observable below never
-    reads the spatial grid, the density field, or the chord ladder at all. It is
-    ``r_e * lambda * n_0 * L`` — the doc 04 §5.1 phase evaluated at the bulk density the
-    solver treats as the sheath problem's own boundary condition (doc 02 §8.3), over the
-    fixed chord length. Both properties below are checked directly rather than argued from
-    the formula.
+class TestObservableReadsTheFieldNotJustTheParameter:
+    """Block F (recovery plan defect #2). Before this fix, ``_predict`` read
+    ``state.params.n_0`` and never touched ``state.field("n_e")`` at all, so this channel
+    was provably blind to the density field: halving ``n_e`` — independently of ``n_0`` —
+    moved its reading by zero bits, and any two states sharing an ``n_0`` produced
+    bit-for-bit identical readings no matter how different their actual ``n_e(z)`` fields
+    were. That is fixed by computing a genuine chord-averaged line integral of
+    ``state.field("n_e")`` (:meth:`_BulkInterferometer._line_averaged_density_per_m3`) — see
+    that method's docstring for the resolved-domain-plus-bulk-extension approximation and
+    its honestly-stated cost. The tests below are the checked version of that claim, not an
+    argument from the formula.
+
+    Still true, and still checked here: this is one line integral per acquisition, not the
+    old 8-chord ladder — the reframing to a *bulk* measurement (as opposed to a sheath
+    sampler) survives Block F unchanged; only the density-source binding changed.
     """
 
     def test_forward_returns_one_value_not_eight_clamped_chords(
@@ -265,13 +278,46 @@ class TestObservableIsABulkMeasurementNotASheathSample:
 
         assert predicted.values.shape == (1,)
 
-    def test_the_observable_is_unchanged_across_wildly_different_sheath_profiles_at_fixed_n_0(
-        self,
-    ) -> None:
+    def test_halving_the_n_e_field_materially_changes_the_reading(self) -> None:
+        """The direct regression test for defect #2: with ``n_0`` held fixed, a field the
+        instrument was never handed a route to before now moves the observable by a
+        material amount. This is the single most important check in this file — it is the
+        one that would have caught the original bug outright.
+        """
+        noiseless = _noiseless_channel()
+        state = _state(_operating_theta())
+        n_e_field = state.field("n_e")
+
+        baseline = noiseless.inversion.forward(state, noiseless.window)
+
+        halved_field = ScalarField(
+            name="n_e",
+            values=n_e_field.values * 0.5,
+            units=n_e_field.units,
+            grid=n_e_field.grid,
+            time=n_e_field.time,
+        )
+        halved_state = dataclasses.replace(state, fields={**state.fields, "n_e": halved_field})
+        # The parameter this channel used to read is untouched: this isolates the field's
+        # own contribution from any change to n_0.
+        assert halved_state.params.n_0 == state.params.n_0
+
+        halved = noiseless.inversion.forward(halved_state, noiseless.window)
+
+        assert baseline.values[0] != pytest.approx(halved.values[0])
+        relative_change = abs(halved.values[0] - baseline.values[0]) / abs(baseline.values[0])
+        # Halving the field roughly halves the electron phase term (the neutral-gas
+        # correction, doc 04 §5.2, does not move at all, so the net change is somewhat
+        # less than 50 %) — "non-trivial" is checked as at least a few percent, not a
+        # razor-thin numerical difference that a rounding bug could also produce.
+        assert relative_change > 0.05
+
+    def test_the_observable_now_depends_on_sheath_profile_shape_at_fixed_n_0(self) -> None:
         # Same n_0, very different bias -> very different sheath thickness and z-profile
         # shape (the presheath solved by AnalyticSheathSolver looks nothing alike at -100 V
-        # vs -250 V), but the bulk boundary condition n_0 is untouched by V_w. A channel
-        # that still depended on the sheath's own shape would move here; this one must not.
+        # vs -250 V). Before Block F this channel could not see that at all (it read only
+        # the untouched n_0 scalar); now it reads the field the profile actually lives in,
+        # so a genuinely different field must produce a genuinely different reading.
         noiseless = _noiseless_channel()
         near_wall_theta = _operating_theta()
         far_wall_theta = near_wall_theta.replace(V_w=_ALTERNATE_BIAS_V)
@@ -279,14 +325,14 @@ class TestObservableIsABulkMeasurementNotASheathSample:
 
         near_state = _state(near_wall_theta)
         far_state = _state(far_wall_theta)
-        # Sanity check that the two states really do have different sheath structure, so
-        # an unchanged observable below is evidence of insensitivity and not a fixture bug.
+        # Sanity check that the two states really do have different sheath structure, so a
+        # moved observable below is evidence of genuine sensitivity and not a fixture bug.
         assert not np.allclose(near_state.field("n_e").values, far_state.field("n_e").values)
 
         near_phase = noiseless.inversion.forward(near_state, noiseless.window)
         far_phase = noiseless.inversion.forward(far_state, noiseless.window)
 
-        np.testing.assert_array_equal(near_phase.values, far_phase.values)
+        assert near_phase.values[0] != pytest.approx(far_phase.values[0])
 
 
 class TestForwardNeverRaisesAcrossTheMapSearchRegion:
@@ -342,14 +388,21 @@ class TestDetectionFloorStillGates:
 
 
 class TestDensitySensitivityAndTemperatureBlindness:
-    """doc 04 §5.1: the phase depends on ``n_e`` alone, and under the bulk reframing that
-    is ``n_0`` alone — ``n_g`` (the neutral correction, doc 04 §5.2) depends on pressure and
-    ``T_g``, never on ``T_e``. Measured directly, not assumed: a 6 % change in ``n_0``
-    moves this channel's log-likelihood by a materially non-zero amount, and a comparable
-    change in ``T_e`` moves it by exactly zero, bit for bit, because ``_predict`` never
-    reads ``T_e`` at all — a stronger, more direct claim than the old chord ladder could
-    make (there, chord 0's genuine T_e-via-presheath-fraction dependence was real, just
-    small; here there is no code path from ``T_e`` to the prediction whatsoever).
+    """doc 04 §5.1: the phase depends on ``n_e`` alone; ``n_g`` (the neutral correction,
+    doc 04 §5.2) depends on pressure and ``T_g``, never on ``T_e``. Post-Block-F, the
+    channel reads a genuine line integral of ``state.field("n_e")``
+    (:meth:`_BulkInterferometer._line_averaged_density_per_m3`), so a 6 % change in ``n_0``
+    still moves the reading materially (the field scales with ``n_0`` almost
+    proportionally — see that method's docstring), but the *near-blindness* to ``T_e`` is
+    no longer bit-for-bit exact the way it was when this channel read the ``n_0`` scalar
+    directly. ``T_e`` enters the resolved near-wall domain's own Boltzmann relation
+    (``n_e = n_s exp(Phi / T_e)``, :mod:`vpl.physics.analytic.sheath`) and, at L0/L1, the
+    sheath thickness the potential profile is built from — so a real, if minuscule,
+    T_e-dependence now exists through that domain, which is a small fraction of the full
+    400 mm chord. That is the honest, checked residual of reading a real field instead of
+    a parameter the two sides of the inverse problem never let disagree about ``T_e``
+    through in the first place: this test asserts the effect stays *small* rather than
+    asserting it is exactly zero, because asserting exactly zero would no longer be true.
     """
 
     def test_the_likelihood_moves_for_a_six_percent_change_in_n_0(self) -> None:
@@ -366,10 +419,17 @@ class TestDensitySensitivityAndTemperatureBlindness:
             observed, noiseless.inversion.forward(denser_state, noiseless.window)
         )
 
-        # Observed directly: ~0.26 log-probability units at this operating point.
-        assert ll_truth - ll_denser > 0.1
+        # Observed directly, post-Block-F: ~0.095 log-probability units at this operating
+        # point — smaller than the pre-Block-F ~0.26, because the reading is now a chord
+        # average dominated by the (~39 %-depleted) presheath-edge sample rather than the
+        # undepleted n_0 parameter, which compresses the channel's own dynamic range. Still
+        # clearly non-zero: this channel remains informative about density, just less
+        # sharply than the (structurally too-easy) parameter read was.
+        assert ll_truth - ll_denser > 0.05
 
-    def test_the_likelihood_is_bit_for_bit_unmoved_by_a_comparable_change_in_t_e(self) -> None:
+    def test_the_likelihood_is_only_negligibly_moved_by_a_comparable_change_in_t_e(
+        self,
+    ) -> None:
         noiseless = _noiseless_channel()
         theta = _operating_theta()
         truth_state = _state(theta)
@@ -383,7 +443,12 @@ class TestDensitySensitivityAndTemperatureBlindness:
             observed, noiseless.inversion.forward(hotter_state, noiseless.window)
         )
 
-        assert ll_truth == ll_hotter
+        # No longer bit-for-bit equal (see the class docstring) — but the T_e channel this
+        # method exposes is the resolved sheath domain's tiny share of the full chord, so
+        # the effect is checked to stay many orders of magnitude below the n_0 sensitivity
+        # above rather than being asserted away as exactly zero.
+        assert ll_truth != ll_hotter
+        assert abs(ll_truth - ll_hotter) < 1.0e-6
 
 
 class TestCalibrationUncertaintyAdapter:
